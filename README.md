@@ -32,6 +32,10 @@ In the UI:
 3. Open **Datasets** → pick a technique → **Download** → **Replay**.
 4. Open **Playbook** and run the hunts.
 
+> Already running the lab from a parent folder that has its own
+> `docker-compose.yml`? Start it from there, or use the dashboard's **Start
+> Splunk** button; the app keeps the parent Compose project name and volumes.
+
 Splunk's index and HEC token are created automatically on the first replay if
 they do not already exist. Use `--port 8766` if 8765 is taken.
 
