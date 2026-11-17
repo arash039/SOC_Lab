@@ -1,0 +1,29 @@
+services:
+  splunk:
+    image: splunk/splunk:latest
+    container_name: splunk-soc
+    restart: unless-stopped
+    environment:
+      SPLUNK_GENERAL_TERMS: "--accept-sgt-current-at-splunk-com"
+      SPLUNK_START_ARGS: "--accept-license"
+      SPLUNK_PASSWORD: "${SPLUNK_PASSWORD:-S0cPractice!2026}"
+      # Seeds an HEC token on first boot. The SOC Lab app creates one if this
+      # is absent, so change this only if you also change the app's env.
+      SPLUNK_HEC_TOKEN: "${SPLUNK_HEC_TOKEN:-c1aa30d0-c5a5-43cc-8ee3-329a5253565a}"
+    ports:
+      - "${SPLUNK_WEB_PORT:-8000}:8000"
+      - "8088:8088"
+      - "8089:8089"
+    volumes:
+      - splunk-etc:/opt/splunk/etc
+      - splunk-var:/opt/splunk/var
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/en-US/account/login"]
+      interval: 15s
+      timeout: 5s
+      retries: 30
+      start_period: 120s
+
+volumes:
+  splunk-etc:
+  splunk-var:
