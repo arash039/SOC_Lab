@@ -1,0 +1,152 @@
+[
+  {
+    "phase": "1 · Orient yourself",
+    "intro": "Before hunting, learn what telemetry the dataset contains and whether the fields you expect are actually there.",
+    "recipes": [
+      {
+        "id": "inventory",
+        "title": "What data is loaded?",
+        "why": "Every investigation starts with a data inventory. Count events per sourcetype and source to see which sensors fired.",
+        "spl": "index=attack_data\n| stats count by sourcetype source\n| sort -count",
+        "techniques": []
+      },
+      {
+        "id": "event-mix",
+        "title": "Which Windows event IDs are present?",
+        "why": "Event ID 1 is process creation, 10 is process access, 3 is network, 4688 is Security process creation. This histogram is your map of the dataset.",
+        "spl": "index=attack_data sourcetype=XmlWinEventLog\n| stats count by EventCode\n| sort -count",
+        "techniques": []
+      },
+      {
+        "id": "field-check",
+        "title": "Are fields extracted?",
+        "why": "If with_eventcode is 0, the lab field-extraction config is missing and every field-based hunt will look empty. Install it from the dashboard banner.",
+        "spl": "index=attack_data sourcetype=XmlWinEventLog\n| stats count as events count(EventCode) as with_eventcode count(Image) as sysmon_processes count(NewProcessName) as security_processes",
+        "techniques": []
+      },
+      {
+        "id": "raw-event",
+        "title": "Read one raw event",
+        "why": "SOC analysts still read raw logs. Look at the XML structure and where each field comes from.",
+        "spl": "index=attack_data sourcetype=XmlWinEventLog\n| head 1\n| table _time host source sourcetype _raw",
+        "techniques": []
+      }
+    ]
+  },
+  {
+    "phase": "2 · Reconstruct the activity",
+    "intro": "Turn raw events into a story: what ran, in what order, and under which parent process.",
+    "recipes": [
+      {
+        "id": "process-timeline",
+        "title": "Process execution timeline",
+        "why": "Normalize Sysmon (Image) and Security (NewProcessName) fields into one timeline. Sorting ascending shows the attacker's sequence.",
+        "spl": "index=attack_data sourcetype=XmlWinEventLog (EventCode=1 OR EventCode=4688)\n| eval Process=coalesce(Image, NewProcessName), Parent=coalesce(ParentImage, ParentProcessName), Account=coalesce(User, SubjectUserName)\n| table _time host EventCode Process Parent CommandLine Account\n| sort _time\n| head 200",
+        "techniques": []
+      },
+      {
+        "id": "process-tree",
+        "title": "Parent → child process pairs",
+        "why": "Malicious behavior usually stands out in the ancestry: cmd.exe spawning rundll32.exe, or a web server spawning PowerShell.",
+        "spl": "index=attack_data sourcetype=XmlWinEventLog (EventCode=1 OR EventCode=4688)\n| eval Process=coalesce(Image, NewProcessName), Parent=coalesce(ParentImage, ParentProcessName)\n| stats count by Parent Process\n| sort -count\n| head 30",
+        "techniques": []
+      },
+      {
+        "id": "rare-processes",
+        "title": "Rare processes (frequency analysis)",
+        "why": "Rarity is a hunter's best friend. Processes that appear once or twice in a dataset deserve a look.",
+        "spl": "index=attack_data sourcetype=XmlWinEventLog\n| eval Process=coalesce(Image, NewProcessName)\n| stats count by Process\n| sort count\n| head 25",
+        "techniques": []
+      },
+      {
+        "id": "cross-source",
+        "title": "Cross-source coverage",
+        "why": "If only one sensor saw the attack, you have a visibility gap. Compare what each source recorded per host.",
+        "spl": "index=attack_data\n| stats dc(sourcetype) as source_types count as events values(sourcetype) as sourcetypes by host\n| sort -events",
+        "techniques": []
+      }
+    ]
+  },
+  {
+    "phase": "3 · Hunt the technique",
+    "intro": "Hypothesis-driven hunts. Each query encodes a behavior, not a single indicator.",
+    "recipes": [
+      {
+        "id": "lsass-access",
+        "title": "LSASS process access",
+        "why": "Credential dumping opens lsass.exe with read/full-access rights. GrantedAccess values such as 0x1010, 0x1410, 0x1438, 0x143a and 0x1fffff are strong signals.",
+        "spl": "index=attack_data sourcetype=XmlWinEventLog EventCode=10\n| search TargetImage=\"*lsass.exe\"\n| eval Process=coalesce(SourceImage, Image)\n| table _time host Process TargetImage GrantedAccess User\n| sort -_time",
+        "techniques": ["T1003", "T1003.001", "T1003.002", "T1003.003"]
+      },
+      {
+        "id": "dump-commands",
+        "title": "Credential dumping command lines",
+        "why": "Procdump, comsvcs.dll MiniDump, mimikatz and pypykatz leave distinctive command lines. This is classic detection-engineering evidence.",
+        "spl": "index=attack_data\n| search CommandLine=\"*procdump*\" OR CommandLine=\"*comsvcs*\" OR CommandLine=\"*minidump*\" OR CommandLine=\"*mimikatz*\" OR Image=\"*mimikatz*\" OR NewProcessName=\"*mimikatz*\"\n| eval Process=coalesce(Image, NewProcessName), Parent=coalesce(ParentImage, ParentProcessName)\n| table _time host EventCode Process Parent CommandLine\n| sort -_time",
+        "techniques": ["T1003", "T1003.001", "T1003.002", "T1003.003"]
+      },
+      {
+        "id": "powershell",
+        "title": "PowerShell execution",
+        "why": "Attackers love PowerShell. Look for suspicious parents, encoded arguments, and download cradle strings.",
+        "spl": "index=attack_data\n| search Image=\"*powershell*\" OR NewProcessName=\"*powershell*\" OR CommandLine=\"*powershell*\"\n| eval Process=coalesce(Image, NewProcessName), Account=coalesce(User, SubjectUserName)\n| stats count values(CommandLine) as commands by host Account Process\n| sort -count",
+        "techniques": ["T1059", "T1059.001", "T1059.003"]
+      },
+      {
+        "id": "encoded-commands",
+        "title": "Encoded or obfuscated commands",
+        "why": "Base64 and encoded-command switches hide intent from casual review. Decode them before deciding.",
+        "spl": "index=attack_data\n| search CommandLine=\"*-enc*\" OR CommandLine=\"*-EncodedCommand*\" OR CommandLine=\"*FromBase64String*\"\n| table _time host CommandLine\n| sort -_time",
+        "techniques": ["T1027", "T1059.001"]
+      },
+      {
+        "id": "network",
+        "title": "Outbound network connections",
+        "why": "Sysmon Event ID 3 shows process-to-IP telemetry. Rare destinations and unusual process/port pairs are worth triage.",
+        "spl": "index=attack_data sourcetype=XmlWinEventLog EventCode=3\n| eval Process=coalesce(Image, NewProcessName)\n| stats count values(Process) as processes by DestinationIp DestinationPort Protocol\n| sort -count\n| head 30",
+        "techniques": ["T1071", "T1041", "T1105"]
+      },
+      {
+        "id": "persistence",
+        "title": "Persistence mechanisms",
+        "why": "Service installs (7045), scheduled tasks (4698/4697) and registry run keys (Sysmon 13) are common persistence paths.",
+        "spl": "index=attack_data sourcetype=XmlWinEventLog (EventCode=7045 OR EventCode=4697 OR EventCode=4698 OR EventCode=13)\n| eval Detail=coalesce(ServiceName, TaskName, TargetObject)\n| table _time host EventCode Detail Image CommandLine\n| sort -_time\n| head 100",
+        "techniques": ["T1053", "T1543", "T1547", "T1136"]
+      }
+    ]
+  },
+  {
+    "phase": "4 · Triage like an analyst",
+    "intro": "An alert is a question, not an answer. Build the timeline, decide true/false positive, and write down the evidence.",
+    "recipes": [
+      {
+        "id": "attack-timeline",
+        "title": "Attack timeline around LSASS",
+        "why": "Correlate process access with the commands that caused it. This is the evidence you would attach to an incident ticket.",
+        "spl": "index=attack_data\n| search (EventCode=10 AND TargetImage=\"*lsass*\") OR CommandLine=\"*lsass*\"\n| eval Process=coalesce(Image, NewProcessName), Parent=coalesce(ParentImage, ParentProcessName)\n| table _time host sourcetype EventCode Process Parent CommandLine TargetImage GrantedAccess\n| sort _time\n| head 200",
+        "techniques": ["T1003", "T1003.001", "T1003.002", "T1003.003"]
+      },
+      {
+        "id": "scope",
+        "title": "Scope: which hosts and accounts?",
+        "why": "Determine blast radius before escalating. Count activity per host and account.",
+        "spl": "index=attack_data\n| eval Account=coalesce(User, SubjectUserName, SubjectDomainName)\n| stats count dc(sourcetype) as sources by host Account\n| sort -count",
+        "techniques": []
+      },
+      {
+        "id": "detection",
+        "title": "Candidate detection: LSASS dumping",
+        "why": "This is a small detection you can save in Splunk. It combines process access rights with known dumping command lines.",
+        "spl": "index=attack_data sourcetype=XmlWinEventLog\n| search (CommandLine=\"*procdump*\" AND CommandLine=\"*lsass*\") OR CommandLine=\"*comsvcs.dll*Minidump*\" OR (EventCode=10 AND TargetImage=\"*lsass*\" AND GrantedAccess IN (\"0x1010\",\"0x1410\",\"0x1438\",\"0x143a\",\"0x1fffff\"))\n| eval Process=coalesce(Image, NewProcessName), Parent=coalesce(ParentImage, ParentProcessName)\n| stats count values(CommandLine) as commands values(GrantedAccess) as access by host Process Parent\n| where count > 0",
+        "techniques": ["T1003", "T1003.001"]
+      },
+      {
+        "id": "tuning",
+        "title": "Tune it: baseline the tool",
+        "why": "Procdump is legitimate in some environments. Establish who runs it and from where before deciding it is malicious.",
+        "spl": "index=attack_data\n| search CommandLine=\"*procdump*\" OR Image=\"*procdump*\" OR NewProcessName=\"*procdump*\"\n| eval Process=coalesce(Image, NewProcessName), Account=coalesce(User, SubjectUserName), Parent=coalesce(ParentImage, ParentProcessName)\n| stats count values(CommandLine) as commands by host Account Parent Process\n| sort -count",
+        "techniques": ["T1003", "T1003.001"]
+      }
+    ]
+  }
+]

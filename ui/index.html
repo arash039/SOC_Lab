@@ -1,0 +1,179 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>SOC Lab · attack_data</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <span class="pulse" id="pulse"></span>
+      <div>
+        <strong>SOC Lab</strong>
+        <span>attack_data × Splunk</span>
+      </div>
+    </div>
+
+    <nav id="tabs" aria-label="Sections">
+      <button data-tab="dashboard" class="active">Dashboard</button>
+      <button data-tab="datasets">Datasets</button>
+      <button data-tab="search">Search</button>
+      <button data-tab="playbook">Playbook</button>
+    </nav>
+
+    <div class="top-actions">
+      <span id="lab-pill" class="pill">checking…</span>
+      <a id="splunk-link" class="btn ghost" href="http://127.0.0.1:8000" target="_blank" rel="noreferrer">Open Splunk ↗</a>
+    </div>
+  </header>
+
+  <div id="banner" class="banner hidden"></div>
+
+  <main>
+    <section id="tab-dashboard" class="tab active">
+      <div class="hero">
+        <div class="hero-copy">
+          <h1>Practice SOC work on real attack telemetry.</h1>
+          <p>Pick a dataset, replay it into Splunk, then hunt and triage it. This UI drives your local <code>attack_data</code> checkout and Splunk container — no manual commands.</p>
+        </div>
+        <div class="hero-actions">
+          <button class="btn primary" data-goto="datasets">Browse datasets</button>
+          <button class="btn" data-goto="playbook">Open playbook</button>
+        </div>
+      </div>
+
+      <div id="status-cards" class="cards">
+        <div class="card skeleton"></div><div class="card skeleton"></div>
+        <div class="card skeleton"></div><div class="card skeleton"></div>
+      </div>
+
+      <div class="grid-2">
+        <div class="panel">
+          <div class="panel-head">
+            <h2>Next steps</h2>
+            <span class="muted small">your learning loop</span>
+          </div>
+          <ol id="checklist" class="checklist"><li class="muted">Checking lab…</li></ol>
+        </div>
+
+        <div class="panel">
+          <div class="panel-head">
+            <h2>Loaded telemetry</h2>
+            <button class="btn tiny" data-action="refresh-status">Refresh</button>
+          </div>
+          <div id="loaded-table"><p class="muted">Loading…</p></div>
+        </div>
+      </div>
+
+      <div class="panel">
+        <div class="panel-head">
+          <h2>Recent jobs</h2>
+          <span class="muted small">downloads, replays, setup</span>
+        </div>
+        <div id="recent-jobs"><p class="muted">No jobs yet.</p></div>
+      </div>
+    </section>
+
+    <section id="tab-datasets" class="tab">
+      <div class="section-head">
+        <div>
+          <h1>Datasets</h1>
+          <p class="muted">Every folder with a dataset YAML in your checkout. Download pulls only that folder through git-lfs.</p>
+        </div>
+        <div class="ds-count" id="ds-count"></div>
+      </div>
+
+      <div class="toolbar">
+        <input id="ds-search" type="search" placeholder="Filter by technique, folder, or description…" autocomplete="off">
+        <select id="ds-category" aria-label="Category"></select>
+        <select id="ds-state" aria-label="Status">
+          <option value="">Any status</option>
+          <option value="ready">Downloaded</option>
+          <option value="missing">Needs download</option>
+          <option value="loaded">Replayed</option>
+        </select>
+        <button class="btn" data-action="refresh-datasets">Refresh</button>
+      </div>
+
+      <div class="split">
+        <div id="ds-list" class="ds-list"><p class="muted">Loading datasets…</p></div>
+        <aside id="ds-detail" class="panel ds-detail">
+          <div class="empty">
+            <div class="empty-icon">⌁</div>
+            <h2>Pick a dataset</h2>
+            <p class="muted">Choose a technique folder to read the scenario, replay it, and run focused hunts.</p>
+          </div>
+        </aside>
+      </div>
+    </section>
+
+    <section id="tab-search" class="tab">
+      <div class="section-head">
+        <div>
+          <h1>Search</h1>
+          <p class="muted">Runs SPL through the Splunk REST API. Use “Open in Splunk” when you want the real investigation UI.</p>
+        </div>
+      </div>
+
+      <div class="panel search-panel">
+        <textarea id="spl" spellcheck="false" autocomplete="off">index=attack_data
+| stats count by sourcetype source
+| sort -count</textarea>
+        <div class="search-controls">
+          <select id="search-range" aria-label="Time range">
+            <option value="all" selected>All time</option>
+            <option value="15m">Last 15 minutes</option>
+            <option value="1h">Last hour</option>
+            <option value="24h">Last 24 hours</option>
+            <option value="7d">Last 7 days</option>
+            <option value="30d">Last 30 days</option>
+          </select>
+          <button class="btn primary" data-action="run-search">Run search</button>
+          <button class="btn" data-action="open-splunk">Open in Splunk ↗</button>
+          <button class="btn ghost" data-action="copy-search">Copy SPL</button>
+          <span id="search-meta" class="muted small"></span>
+        </div>
+        <div class="quick-chips" id="quick-searches"></div>
+      </div>
+
+      <div class="panel">
+        <div class="panel-head"><h2>Results</h2><span id="result-count" class="muted small"></span></div>
+        <div id="search-results"><p class="muted">Run a search to see events. Click a row to inspect the raw JSON.</p></div>
+        <pre id="row-json" class="row-json hidden"></pre>
+      </div>
+    </section>
+
+    <section id="tab-playbook" class="tab">
+      <div class="section-head">
+        <div>
+          <h1>Playbook</h1>
+          <p class="muted">A guided path from data familiarization to triage. Run any query against your loaded data.</p>
+        </div>
+        <div class="guide-links">
+          <a class="btn ghost" href="/api/guide/SOC_PRACTICE_GUIDE.md" target="_blank" rel="noreferrer">Practice guide</a>
+          <a class="btn ghost" href="/api/guide/SOC_EXERCISE_GUIDE.md" target="_blank" rel="noreferrer">Setup guide</a>
+        </div>
+      </div>
+      <div id="playbook"><p class="muted">Loading…</p></div>
+    </section>
+  </main>
+
+  <button id="drawer-toggle" class="drawer-toggle hidden" aria-label="Open job log">
+    Jobs <span id="job-badge">0</span>
+  </button>
+
+  <aside id="drawer" class="drawer" aria-label="Job log">
+    <div class="drawer-head">
+      <h3>Job log</h3>
+      <button class="icon-btn" data-action="close-drawer" aria-label="Close">×</button>
+    </div>
+    <div id="drawer-body"><p class="muted">No jobs yet.</p></div>
+  </aside>
+
+  <div id="toast" class="toast hidden" role="status"></div>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>

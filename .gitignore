@@ -1,0 +1,11 @@
+# Local lab artifacts - never commit data or environments.
+attack_data/
+security_content/
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.env
+*.log
+*.bak
+.DS_Store
