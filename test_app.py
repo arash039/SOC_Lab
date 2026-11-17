@@ -121,6 +121,28 @@ class RecipesTests(unittest.TestCase):
         self.assertGreater(len(ids), 10)
 
 
+class HecTokenTests(unittest.TestCase):
+    def _response(self, entries):
+        response = mock.Mock()
+        response.status_code = 200
+        response.json.return_value = {"entry": entries}
+        return response
+
+    def test_prefers_token_that_allows_the_index(self):
+        entries = [
+            {"content": {"token": "main-only", "disabled": False, "indexes": ["main"]}},
+            {"content": {"token": "attack-data", "disabled": False, "indexes": ["attack_data"]}},
+        ]
+        with mock.patch.object(app, "splunk_request", return_value=self._response(entries)):
+            self.assertEqual(app.get_hec_token(), "attack-data")
+
+    def test_rejects_token_without_index_access(self):
+        entries = [{"content": {"token": "main-only", "disabled": False, "indexes": ["main"]}}]
+        with mock.patch.object(app, "splunk_request", return_value=self._response(entries)):
+            with self.assertRaises(app.SplunkError):
+                app.get_hec_token()
+
+
 class BootstrapTests(unittest.TestCase):
     def test_scan_is_empty_when_checkout_is_missing(self):
         with mock.patch.object(app, "DATASETS_DIR", Path("/tmp/opencode/does-not-exist")):

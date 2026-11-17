@@ -186,10 +186,21 @@ def get_hec_token():
         raise SplunkError(f"Splunk is not reachable at {SPLUNK_URL}: {exc}") from exc
     if resp.status_code != 200:
         raise SplunkError(f"Could not read HEC inputs: {response_error(resp)}")
+    fallback = None
     for entry in resp.json().get("entry", []):
         content = entry.get("content", {})
-        if not content.get("disabled") and content.get("token"):
-            return content["token"]
+        token = content.get("token")
+        if content.get("disabled") or not token:
+            continue
+        raw_indexes = content.get("indexes") or []
+        if isinstance(raw_indexes, str):
+            raw_indexes = raw_indexes.split(",")
+        indexes = {str(part).strip() for part in raw_indexes if str(part).strip()}
+        if not indexes or INDEX in indexes or "*" in indexes:
+            return token
+        fallback = fallback or token
+    if fallback:
+        raise SplunkError(f"No enabled HEC token allows index {INDEX}.")
     raise SplunkError(
         "No enabled HTTP Event Collector token found. Create one in Splunk: "
         "Settings > Data Inputs > HTTP Event Collector."
