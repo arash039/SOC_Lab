@@ -30,7 +30,9 @@ In the UI:
 1. **Clone attack_data** on the dashboard (metadata only, a few MB).
 2. **Install field extraction** when the banner asks (no Splunk restart).
 3. Open **Datasets** → pick a technique → **Download** → **Replay**.
-4. Open **Playbook** and run the hunts.
+4. Open **Scenarios** → pick a case → answer each stage. Progress is saved
+   locally in `state/scenarios.json`.
+5. Open **Playbook** and run the hunts freely.
 
 > Already running the lab from a parent folder that has its own
 > `docker-compose.yml`? Start it from there, or use the dashboard's **Start
@@ -43,6 +45,9 @@ they do not already exist. Use `--port 8766` if 8765 is taken.
 
 - **Dashboard** — Splunk/API/HEC/field status, next steps, replayed datasets,
   job output, and a danger zone for bulk cleanup.
+- **Scenarios** — guided incidents with orient → triage → hunt → scope →
+  detection → verdict stages. Search checks run server-side, progress is saved
+  per scenario and host, and answers are never sent to the browser.
 - **Datasets** — browse and filter technique folders; download one folder at a
   time, replay it, read its YAML metadata, and open host-scoped hunts.
 - **Search** — run SPL, inspect result rows, or open the query in Splunk Web.
@@ -73,12 +78,45 @@ project directory so the existing project name and volumes are preserved.
 | Action | What happens |
 |---|---|
 | Clone attack_data | `git clone --depth 1` with `GIT_LFS_SKIP_SMUDGE=1`; no logs downloaded |
-| Download dataset | `git lfs pull --include=<folder>/` for that one folder |
+| Download dataset | `git lfs pull --include=datasets/<folder>/*` for that one folder |
 | Replay dataset | Sends only the YAML-declared files to HEC |
 
 The full repository is >9 GB. Download only the techniques you are practising.
 A checkout at `./attack_data` is preferred; `ATTACK_DATA_DIR` can point at an
 existing checkout (for example the parent-folder one used during development).
+
+## Scenarios
+
+A scenario is one JSON file in `scenarios/` (see
+`scenarios/T1003-001-Credential-dumping-on-a-Windows-host.json`). Names should
+identify the technique and case, e.g. `T1003-001-<slug>.json`. The JSON declares
+the dataset repository (`dataset.repo`) and folder (`dataset.path`), then walks
+5–7 stages. Each stage has a question, optional hints, and hidden checks. The
+JSON's `starter_spl` is an authoring reference and is never sent to the browser;
+the runner offers **New search** (a fresh, host-scoped SPL editor) and **Open
+Splunk** instead. `host="<HOST>"` in hidden SPL is replaced with the dataset's
+replay host at request time.
+
+- The scenario list and detail endpoints never return check SPL, accepted
+  answers, correct option indexes, or stage debriefs.
+- Checks are `search` (server runs hidden SPL), `spl` (runs the student's SPL),
+  `answer`, `choice`, and `review` (saved, never blocking).
+- Search checks assert presence, not exact counts, so replaying a dataset twice
+  does not break them.
+- **Set up scenario** does the whole chain in one job: clone the
+  repository from `dataset.repo` if needed, start Splunk, download the folder,
+  replay it unless the host already has events, wait for indexing, and install
+  the field extraction. The step list remains as a manual fallback.
+- **Load scenario** accepts a JSON file from disk, validates it, and adds it to
+  `scenarios/` under the chosen filename. It refuses duplicate ids, existing
+  filenames, and path-like names, so it never overwrites an existing scenario.
+- Progress lives in `state/scenarios.json`, keyed by scenario id and replay
+  host, and is gitignored. Reset it from the scenario detail view.
+
+To add a scenario, copy the schema from `docs/SCENARIOS_PLAN.md` and follow
+`docs/SCENARIO_AUTHORING_AGENT.md`; run every check against the real replay
+before committing. The loader validates on every read and hides broken files
+with a warning on stderr.
 
 ## Field extraction (required for Windows hunts)
 
@@ -150,7 +188,8 @@ If you change `SPLUNK_PASSWORD` in `.env`, start the app with the same
 ```
 
 Covers legacy YAML mapping, path-traversal rejection, the field-extraction merge
-(idempotent), missing-checkout scanning, and the recipe file. No network or
+(idempotent), missing-checkout scanning, the recipe file, scenario validation
+and sanitization, answer matching, and progress persistence. No network or
 Splunk access is required.
 
 ## Limits
@@ -165,11 +204,14 @@ Splunk access is required.
 ## Layout
 
 ```
-app.py                  server, Splunk client, dataset scanner, jobs
+app.py                  server, Splunk client, dataset scanner, scenarios, jobs
 recipes.json            playbook hunts
+scenarios/              one JSON scenario per file
 splunk_config/          props.conf + transforms.conf installed into Splunk
 ui/                     index.html, app.js, style.css (no build step)
 docker-compose.yml      Splunk lab
 docs/                   SOC practice and setup guides
 test_app.py             unittest suite
 ```
+
+`state/` is created at runtime and is not committed.

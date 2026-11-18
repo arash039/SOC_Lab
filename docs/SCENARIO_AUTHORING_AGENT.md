@@ -5,8 +5,8 @@
 suggested SPL from the user.
 **Output:** one scenario JSON file under `soc_lab/scenarios/` that conforms to
 `docs/SCENARIOS_PLAN.md`.
-**Status:** scenario mode is planned but not implemented yet. Author and test the
-JSON now; the loader will pick it up when Phase 1 lands.
+**Status:** scenario mode is implemented. This guide is still the authoring
+procedure; run the JSON through a real replay before committing it.
 
 Read `docs/SCENARIOS_PLAN.md` first. It defines the schema, check types, and
 non-goals. This guide is the operational procedure.
@@ -285,7 +285,8 @@ Target 5–7 stages, 20–30 minutes total. A reliable pattern:
 For each stage decide:
 
 - the **question**, phrased as an analyst would ask it;
-- the **starter SPL** (visible, host-scoped, safe to run);
+- the **starter SPL** (an authoring reference, not shown to students — the UI
+  gives them a fresh host-scoped search and Splunk Web);
 - the **hidden check SPL** (never sent to the browser);
 - the **expected stable evidence**;
 - one or two **hints** that narrow the method without naming the answer;
@@ -300,7 +301,7 @@ If the user supplied **suggested searches**:
 1. Normalize them: add `index=attack_data host="<HOST>"`, fix field names, set a
    sensible `stats`/`table` tail.
 2. Run each one and keep only queries that return evidence.
-3. Classify each as either a **starter** (visible) or a **check** (hidden).
+3. Classify each as either a **starter** (authoring reference) or a **check** (hidden).
 4. Never put a check query in `starter_spl` or a hint.
 5. If the suggested search reveals the answer too directly, use it as the
    debrief or detection stage instead.
@@ -341,16 +342,19 @@ the same folder once more and run it a third time. It must still pass.
 
 ## 7. Write the scenario JSON
 
-Create `soc_lab/scenarios/<technique>-<slug>.json`. Follow
-`docs/SCENARIOS_PLAN.md` exactly. Template:
+Create `soc_lab/scenarios/<technique>-<slug>.json`, named for the case, e.g.
+`T1003-001-Credential-dumping-on-a-Windows-host.json`. Follow
+`docs/SCENARIOS_PLAN.md` exactly. The `id` is a lowercase slug; the file name is
+for humans. Template:
 
 ```json
 {
   "schema_version": 1,
-  "id": "t1003-001-lsass-001",
+  "id": "t1003-001-credential-dumping-on-a-windows-host",
   "title": "Credential dumping on a domain controller",
   "summary": "An alert fired for LSASS access. Reconstruct the attack and decide whether to escalate.",
   "dataset": {
+    "repo": "https://github.com/splunk/attack_data.git",
     "path": "attack_techniques/T1003.001/atomic_red_team",
     "techniques": ["T1003.001"],
     "required_fields": ["EventCode", "SourceImage", "TargetImage", "CommandLine"]
@@ -389,9 +393,12 @@ Create `soc_lab/scenarios/<technique>-<slug>.json`. Follow
 
 Authoring requirements:
 
-- Replace every `<HOST>` with the real UUID from the YAML `id`.
+- Keep the literal `host="<HOST>"` in every query; the app substitutes the
+  dataset YAML `id` when it serves or runs the scenario.
 - Use relative dataset paths; never absolute paths or `../`.
 - Include `required_fields` so preflight can warn about missing extraction.
+- `starter_spl` is optional and never sent to the browser; keep it as a
+  maintainer reference or omit it.
 - Keep prompts answerable from the data; hints must not contain the answer.
 - Stage IDs are unique, lowercase, URL-safe.
 - The final debrief must state the verdict, evidence, and one tuning note.
@@ -402,7 +409,7 @@ Authoring requirements:
 
 ## 8. Test before handoff
 
-Manual test (until the scenario engine lands):
+Manual test:
 
 1. For each `search`/`spl` check, run the SPL through `POST /api/search` with
    `"range":"all"`.
@@ -410,7 +417,7 @@ Manual test (until the scenario engine lands):
 3. Run every check a second time; ensure the same pass result.
 4. If practical, replay the same folder again and re-run; ensure it still
    passes.
-5. Run each `starter_spl`; it must return useful evidence, not zero rows.
+5. Run each `starter_spl` as an authoring reference; students do not see it.
 6. Confirm no starter or hint reveals a hidden check's expected value.
 7. Validate the JSON:
 
@@ -436,7 +443,7 @@ and call `/api/scenario?id=<id>` to confirm check SPL and answers are absent.
 - [ ] 5–7 stages, 20–30 minutes, mixed question types.
 - [ ] Every question is answerable from retrieved evidence.
 - [ ] Checks are idempotent, resilient to duplicate events, and time-bounded.
-- [ ] Starter SPL works and is useful; hints do not give away answers.
+- [ ] Starter SPL (authoring reference) is useful; hints do not give away answers.
 - [ ] Required fields are listed and actually present.
 - [ ] No absolute paths, no invented values, no external data.
 - [ ] Final debrief includes verdict, evidence, and a tuning note.
@@ -458,13 +465,13 @@ Evidence gathered:
 
 Stage sketch:
 
-1. **Orient** — “Which log sources are present?” Starter inventory. Check:
+1. **Orient** — “Which log sources are present?” Reference query: inventory. Check:
    `stats count by sourcetype` contains `XmlWinEventLog` and
    `crowdstrike:events:sensor`.
-2. **Triage** — “What process accessed LSASS and under which account?” Starter:
+2. **Triage** — “What process accessed LSASS and under which account?” Reference:
    Sysmon 10 table. Check: `SourceImage` contains `procdump`, `User` equals the
    observed account.
-3. **Hunt** — “Find the command line used to create the dump.” Starter: process
+3. **Hunt** — “Find the command line used to create the dump.” Reference: process
    creation. Check: `CommandLine` contains `procdump` and `lsass`.
 4. **Scope** — “Did any other host report this behavior?” Check: distinct hosts
    with the dump pattern; expected one in this dataset.

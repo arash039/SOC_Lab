@@ -1,6 +1,10 @@
 # Scenario Mode — staged implementation plan
 
-**Status:** proposed, not implemented.
+**Status:** Phases 0–4 implemented (loader, preflight, checks, progress, UI);
+Phase 5 content started with
+`scenarios/T1003-001-Credential-dumping-on-a-Windows-host.json`. The scenario
+detail offers a one-click **Set up scenario** job using `dataset.repo` and
+`dataset.path` from the JSON.
 **Companion guide:** `docs/SCENARIO_AUTHORING_AGENT.md` — how an agent turns a
 dataset folder plus suggested searches into a scenario JSON.
 **Scope:** a new **Scenarios** tab that turns a replayed `attack_data` dataset into a
@@ -32,6 +36,7 @@ These are deliberately deferred; see Phase 7.
 |---|---|---|
 | Progress storage | Server-side JSON (`state/scenarios.json`) | Survives browser changes, lets the server grade |
 | Answer/check secrecy | Never send check SPL or correct answers to the browser | Students should not inspect answers in devtools |
+| Query help | Hide the authoring `starter_spl`; offer **New search** and **Open Splunk** | The hunt should be the student's own work |
 | Grading strictness | Hard checks for searches/evidence; soft review for free text | Free text is ambiguous without an instructor |
 | Count-based assertions | Presence/distinct/range, not exact row counts | Replay can duplicate events; checks must be idempotent |
 | Scenario data | One curated JSON file per scenario | Reviewable in git; no code changes to add content |
@@ -43,8 +48,8 @@ These are deliberately deferred; see Phase 7.
 ```
 soc_lab/
   scenarios/
-    lsass-001.json
-    powershell-001.json
+    T1003-001-Credential-dumping-on-a-Windows-host.json
+    T1059-001-PowerShell-execution.json
     persistence-001.json
   state/                       # gitignored, created at runtime
     scenarios.json
@@ -58,10 +63,11 @@ soc_lab/
 ```json
 {
   "schema_version": 1,
-  "id": "lsass-001",
+  "id": "t1003-001-credential-dumping-on-a-windows-host",
   "title": "Credential dumping on a domain controller",
   "summary": "An alert fired for LSASS access. Reconstruct the attack and decide whether to escalate.",
   "dataset": {
+    "repo": "https://github.com/splunk/attack_data.git",
     "path": "attack_techniques/T1003.001/atomic_red_team",
     "techniques": ["T1003.001"],
     "required_fields": ["EventCode", "SourceImage", "TargetImage", "CommandLine"]
@@ -108,6 +114,15 @@ soc_lab/
   "debrief": "Summary of the incident, what a real SOC would do, and tuning notes."
 }
 ```
+
+`starter_spl` in the example is an authoring reference. The public scenario API
+never sends it; the UI gives students a fresh host-scoped search instead.
+
+`dataset.repo` and `dataset.path` are the download inputs. **Set up scenario**
+clones `repo` when no checkout exists, runs `git lfs pull --include=datasets/<path>/*`,
+replays the folder's YAML into the lab index, waits for the host's events, and
+installs the field extraction. File names should be representative, e.g.
+`T1003-001-Credential-dumping-on-a-Windows-host.json`; the `id` stays lowercase.
 
 ### Check types
 
@@ -188,12 +203,14 @@ server restart, and no hidden SPL appears in responses.
 - [ ] Add the **Scenarios** tab and nav entry.
 - [ ] List view: title, summary, technique, difficulty, estimated time,
       progress bar, completed badge.
-- [ ] Runner: stage rail, narrative, question widget, starter SPL with
-      copy/open/run, hint reveal, submit, check feedback, evidence preview,
-      next stage, final debrief.
+- [ ] Runner: stage rail, narrative, question widget, hints, fresh host-scoped
+      search and Splunk Web buttons, submit, check feedback, next stage, final debrief.
 - [ ] Reuse the existing results table renderer for evidence; add a compact
       mode rather than duplicating table code.
-- [ ] Preflight screen with the same action buttons used elsewhere.
+- [ ] Preflight screen with one **Set up scenario** job (clone, download,
+      replay, wait, install fields) instead of per-step buttons.
+- [ ] **Load scenario** button: validates an uploaded JSON file, writes it to
+      `scenarios/`, then refreshes and opens it.
 - [ ] Reset button with confirmation.
 - [ ] Accessibility: labels, keyboard submit, focus movement on stage change.
 - [ ] Headless-browser smoke test for one full scenario path.
