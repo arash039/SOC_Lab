@@ -283,6 +283,8 @@ td.right .btn { margin-left: 4px; }
 .badge.red { color: var(--red); border-color: rgba(251, 113, 133, 0.35); background: rgba(251, 113, 133, 0.07); }
 .badge.blue { color: var(--accent); border-color: rgba(56, 189, 248, 0.35); background: rgba(56, 189, 248, 0.07); }
 .badge.purple { color: var(--purple); border-color: rgba(167, 139, 250, 0.35); background: rgba(167, 139, 250, 0.07); }
+a.badge { text-decoration: none; }
+a.badge:hover { color: #ede9fe; border-color: var(--purple); background: rgba(167, 139, 250, 0.16); }
 
 .chips { display: inline-flex; flex-wrap: wrap; gap: 5px; }
 

@@ -23,6 +23,14 @@ const escaped = (value) =>
     '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
   }[ch]));
 
+function techniqueBadge(tech) {
+  const match = /^(T\d{4})(?:\.(\d{3}))?$/.exec(String(tech ?? '').trim());
+  const label = `<span class="badge purple">${escaped(tech)}</span>`;
+  if (!match) return label;
+  const url = `https://attack.mitre.org/techniques/${match[1]}/${match[2] ? `${match[2]}/` : ''}`;
+  return `<a class="badge purple" href="${url}" target="_blank" rel="noopener" title="Open ${escaped(tech)} on MITRE ATT&CK">${escaped(tech)}</a>`;
+}
+
 async function api(path, options = {}) {
   const response = await fetch(path, {
     headers: { 'Content-Type': 'application/json' },
@@ -467,7 +475,10 @@ function renderDetail() {
     <div class="hunt">
       <div class="hunt-head">
         <span class="hunt-title">${escaped(recipe.title)}</span>
-        <button class="btn tiny" data-action="run-recipe" data-recipe="${escaped(recipe.id)}" data-host="${escaped(huntHost)}">Run</button>
+        <span class="chips">
+          ${recipe.techniques?.length ? techniqueBadge(recipe.techniques[0]) : ''}
+          <button class="btn tiny" data-action="run-recipe" data-recipe="${escaped(recipe.id)}" data-host="${escaped(huntHost)}">Run</button>
+        </span>
       </div>
       <div class="hunt-why">${escaped(recipe.why)}</div>
     </div>`).join('') : '<p class="muted">No technique-specific hunts yet. Use the Playbook for generic ones.</p>';
@@ -494,7 +505,7 @@ function renderDetail() {
     <p class="description">${escaped(detail.description || 'No description in the dataset YAML.')}</p>
 
     <dl class="meta-grid">
-      <dt>Technique</dt><dd class="chips">${techniques.map((tech) => `<span class="badge purple">${escaped(tech)}</span>`).join('') || '<span class="muted">—</span>'}</dd>
+      <dt>Technique</dt><dd class="chips">${techniques.map(techniqueBadge).join('') || '<span class="muted">—</span>'}</dd>
       <dt>Host / UUID</dt><dd class="mono">${(detail.hosts || []).map(escaped).join('<br>') || '<span class="muted">not declared</span>'}</dd>
       <dt>Environment</dt><dd>${escaped(detail.environment || '—')}</dd>
       <dt>Files</dt><dd>${detail.ready_files}/${detail.file_count} local · ${formatBytes(detail.bytes)}</dd>
@@ -635,7 +646,7 @@ function showSearchContext(recipe) {
     return;
   }
   const techniques = (recipe.techniques || [])
-    .map((tech) => `<span class="badge purple">${escaped(tech)}</span>`)
+    .map(techniqueBadge)
     .join('');
   box.innerHTML = `
     <div class="search-context-head">
