@@ -9,3 +9,4 @@ __pycache__/
 *.log
 *.bak
 .DS_Store
+state/
