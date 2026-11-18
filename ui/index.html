@@ -18,6 +18,7 @@
 
     <nav id="tabs" aria-label="Sections">
       <button data-tab="dashboard" class="active">Dashboard</button>
+      <button data-tab="scenarios">Scenarios</button>
       <button data-tab="datasets">Datasets</button>
       <button data-tab="search">Search</button>
       <button data-tab="playbook">Playbook</button>
@@ -39,7 +40,8 @@
           <p>Pick a dataset, replay it into Splunk, then hunt and triage it. This UI drives your local <code>attack_data</code> checkout and Splunk container — no manual commands.</p>
         </div>
         <div class="hero-actions">
-          <button class="btn primary" data-goto="datasets">Browse datasets</button>
+          <button class="btn primary" data-goto="scenarios">Start a scenario</button>
+          <button class="btn" data-goto="datasets">Browse datasets</button>
           <button class="btn" data-goto="playbook">Open playbook</button>
         </div>
       </div>
@@ -90,6 +92,31 @@
           metadata, so you can download the folder again.
         </p>
       </details>
+    </section>
+
+    <section id="tab-scenarios" class="tab">
+      <div class="section-head">
+        <div>
+          <h1>Scenarios</h1>
+          <p class="muted">A guided incident, stage by stage. Answers are checked against the replayed telemetry, and your progress is stored on this machine.</p>
+        </div>
+        <div class="chips" style="align-items:center">
+          <button class="btn primary" data-action="scenario-load">Load scenario</button>
+          <span class="ds-count" id="scenario-count"></span>
+        </div>
+      </div>
+      <input type="file" id="scenario-file" class="hidden" accept=".json,application/json">
+
+      <div class="split">
+        <div id="scenario-list" class="ds-list"><p class="muted" style="padding:16px">Loading scenarios…</p></div>
+        <aside id="scenario-detail" class="panel ds-detail">
+          <div class="empty">
+            <div class="empty-icon">◎</div>
+            <h2>Pick a scenario</h2>
+            <p class="muted">Each scenario walks the same dataset through orient, triage, hunt, scope, detection and verdict.</p>
+          </div>
+        </aside>
+      </div>
     </section>
 
     <section id="tab-datasets" class="tab">

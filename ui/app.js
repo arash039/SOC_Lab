@@ -11,6 +11,13 @@ const state = {
   jobs: [],
   selected: null,
   selectedDetail: null,
+  scenarios: null,
+  scenarioId: null,
+  scenarioDoc: null,
+  scenarioPreflight: null,
+  stageIndex: 0,
+  lastCheck: null,
+  hintCount: {},
 };
 
 let searchRows = [];
@@ -54,6 +61,7 @@ function showTab(name) {
   $$('#tabs button').forEach((btn) => btn.classList.toggle('active', btn.dataset.tab === name));
   $$('.tab').forEach((section) => section.classList.toggle('active', section.id === `tab-${name}`));
   if (name === 'playbook' && state.recipes) renderPlaybook();
+  if (name === 'scenarios' && !state.scenarios) loadScenarios();
 }
 
 function allRecipes() {
@@ -548,6 +556,378 @@ function recipeMatches(recipe, techniques) {
 }
 
 /* ------------------------------------------------------------------ */
+/* scenarios                                                          */
+/* ------------------------------------------------------------------ */
+
+async function loadScenarios() {
+  try {
+    state.scenarios = await api('/api/scenarios');
+  } catch (error) {
+    toast(error.message, true);
+    return;
+  }
+  renderScenarioList();
+}
+
+function scenarioBadges(scenario) {
+  return [
+    ...(scenario.techniques || []).map((tech) => `<span class="badge purple">${escaped(tech)}</span>`),
+    scenario.difficulty ? `<span class="badge blue">${escaped(scenario.difficulty)}</span>` : '',
+    scenario.estimated_minutes ? `<span class="badge">${escaped(scenario.estimated_minutes)} min</span>` : '',
+  ].join('');
+}
+
+function renderScenarioList() {
+  const list = $('#scenario-list');
+  if (!list) return;
+  const scenarios = state.scenarios?.scenarios || [];
+  $('#scenario-count').textContent = `${scenarios.length} scenario${scenarios.length === 1 ? '' : 's'}`;
+  if (!scenarios.length) {
+    list.innerHTML = `<div class="empty">
+      <div class="empty-icon">◎</div>
+      <h2>No scenarios found</h2>
+      <p class="muted">Add a JSON file under <code>soc_lab/scenarios/</code>, or pull the latest app version.</p>
+    </div>`;
+    return;
+  }
+  list.innerHTML = scenarios.map((scenario) => {
+    const percent = scenario.stage_count
+      ? Math.round((scenario.completed / scenario.stage_count) * 100)
+      : 0;
+    return `<button class="ds-row ${scenario.id === state.scenarioId ? 'active' : ''}" data-action="scenario-open" data-id="${escaped(scenario.id)}">
+      <div class="ds-info">
+        <div class="ds-title">
+          ${scenario.done ? '<span class="dot green"></span>' : ''}${escaped(scenario.title)}
+          ${scenario.done ? '<span class="badge green">complete</span>' : ''}
+        </div>
+        <div class="scenario-summary">${escaped(scenario.summary)}</div>
+        <div class="progress" aria-hidden="true"><span style="width:${percent}%"></span></div>
+      </div>
+      <div class="ds-side">
+        <span class="chips">${scenarioBadges(scenario)}</span>
+        <span class="muted small">${scenario.completed}/${scenario.stage_count} stages</span>
+      </div>
+    </button>`;
+  }).join('');
+}
+
+async function openScenario(id, keepStage = false) {
+  state.scenarioId = id;
+  try {
+    const data = await api(`/api/scenario?id=${encodeURIComponent(id)}`);
+    state.scenarioDoc = data.scenario;
+    state.scenarioPreflight = data.preflight;
+  } catch (error) {
+    toast(error.message, true);
+    return;
+  }
+  if (!keepStage) {
+    const completed = state.scenarioDoc.progress.completed || [];
+    const next = state.scenarioDoc.stages.findIndex((stage) => !completed.includes(stage.id));
+    state.stageIndex = next === -1 ? 0 : next;
+    state.lastCheck = null;
+    state.hintCount = {};
+  }
+  renderScenarioList();
+  renderScenarioDetail();
+}
+
+function preflightMarkup(preflight) {
+  if (!preflight) return '<p class="muted">Checking lab readiness…</p>';
+  const steps = (preflight.steps || []).map((step) => `
+    <li class="${step.ok ? 'done' : ''}">
+      <span class="step-num">${step.ok ? '✓' : '!'}</span>
+      <div class="step-body">
+        <div class="step-title">${escaped(step.label)}</div>
+        <div class="step-detail">${escaped(step.detail)}</div>
+      </div>
+    </li>`).join('');
+  return `<div class="note warn">
+      <strong>This scenario needs setup.</strong> One click clones the dataset repository if needed,
+      downloads this scenario's files, installs field extraction, and replays the data.
+      <div class="setup-actions">
+        <button class="btn primary" data-action="scenario-setup">Set up scenario</button>
+      </div>
+    </div>
+    <ol class="checklist">${steps}</ol>`;
+}
+
+function renderScenarioDetail() {
+  const container = $('#scenario-detail');
+  const scenario = state.scenarioDoc;
+  if (!container || !scenario) return;
+
+  const header = `
+    <div class="section-head" style="padding:0 0 8px">
+      <div>
+        <h1>${escaped(scenario.title)}</h1>
+        <div class="detail-path">${escaped(scenario.dataset.path)}</div>
+      </div>
+      <div class="chips">${scenarioBadges(scenario)}</div>
+    </div>
+    <p class="description">${escaped(scenario.summary)}</p>`;
+
+  if (!state.scenarioPreflight?.ready) {
+    container.innerHTML = header + preflightMarkup(state.scenarioPreflight);
+    return;
+  }
+
+  const stage = scenario.stages[state.stageIndex];
+  if (!stage) return;
+  const completed = scenario.progress.completed || [];
+  const hints = stage.hints || [];
+  const shown = state.hintCount[stage.id] || 0;
+
+  container.innerHTML = `
+    ${header}
+    <div class="note"><strong>Briefing.</strong> ${escaped(scenario.briefing)}</div>
+    ${scenario.debrief ? `<div class="note"><strong>Debrief.</strong> ${escaped(scenario.debrief)}</div>` : ''}
+    <nav class="stage-rail" aria-label="Scenario stages">
+      ${scenario.stages.map((item, index) => `
+        <button class="${index === state.stageIndex ? 'active' : ''} ${completed.includes(item.id) ? 'done' : ''}"
+          data-action="scenario-stage" data-index="${index}"
+          aria-current="${index === state.stageIndex ? 'step' : 'false'}">
+          <span class="stage-num">${completed.includes(item.id) ? '✓' : index + 1}</span>
+          ${escaped(item.title)}
+        </button>`).join('')}
+    </nav>
+    <article class="stage-card">
+      <div class="stage-kicker">Stage ${state.stageIndex + 1} of ${scenario.stages.length}</div>
+      <h2 id="stage-title" tabindex="-1">${escaped(stage.title)}</h2>
+      <p class="narrative">${escaped(stage.narrative)}</p>
+      <p class="question">${escaped(stage.question)}</p>
+
+      ${scenarioTools()}
+
+      <div class="hints">
+        ${hints.slice(0, shown).map((hint) => `<div class="hint">${escaped(hint)}</div>`).join('')}
+        ${shown < hints.length
+          ? `<button class="btn tiny ghost" data-action="scenario-hint">Show a hint (${shown}/${hints.length})</button>`
+          : ''}
+      </div>
+
+      <form id="scenario-form">
+        ${stageInputs(stage)}
+        <div class="stage-actions">
+          <button class="btn primary" type="submit">Submit answer</button>
+          ${completed.includes(stage.id) ? '<span class="muted small">Already completed — resubmitting is practice.</span>' : ''}
+        </div>
+      </form>
+
+      ${feedbackMarkup()}
+    </article>
+
+    <div class="detail-actions">
+      <button class="btn ghost" data-action="refresh-scenarios">Refresh readiness</button>
+      <button class="btn danger" data-action="scenario-reset">Reset progress</button>
+    </div>`;
+}
+
+function scenarioTools() {
+  return `<div class="scenario-tools">
+    <div>
+      <strong>Write your own query.</strong>
+      <span class="muted small">Start from the lab index and this host, or investigate in Splunk Web.</span>
+    </div>
+    <span class="chips">
+      <button class="btn tiny primary" data-action="scenario-new-search">New search</button>
+      <button class="btn tiny ghost" data-action="scenario-open-splunk">Open Splunk ↗</button>
+    </span>
+  </div>`;
+}
+
+function stageInputs(stage) {
+  const inputs = stage.inputs || [];
+  let html = '';
+  if (stage.answer?.type === 'choice') {
+    html += `<fieldset class="choices">
+      <legend>Choose one</legend>
+      ${stage.answer.options.map((option, index) => `
+        <label class="choice">
+          <input type="radio" name="answer" value="${index}" required>
+          <span>${escaped(option)}</span>
+        </label>`).join('')}
+    </fieldset>`;
+  } else if (stage.answer?.type === 'answer') {
+    html += `<label class="field">
+      <span>Your answer</span>
+      <input name="answer" type="text" autocomplete="off" spellcheck="false" required>
+    </label>`;
+  }
+  if (inputs.includes('spl')) {
+    html += `<label class="field">
+      <span>Your SPL (run against the lab index)</span>
+      <textarea name="spl" rows="5" spellcheck="false" required placeholder="index=attack_data host=&quot;...&quot; | stats count"></textarea>
+    </label>`;
+  }
+  if (inputs.includes('review')) {
+    html += `<label class="field">
+      <span>Your reasoning (saved for the debrief, not auto-graded)</span>
+      <textarea name="review" rows="4"></textarea>
+    </label>`;
+  }
+  return html || '<p class="muted">This stage has no input.</p>';
+}
+
+function feedbackMarkup() {
+  const result = state.lastCheck;
+  if (!result) return '';
+  const results = (result.results || []).map((item) => `
+    <li class="${item.passed ? 'ok' : 'bad'}">
+      <span>${item.passed ? '✓' : '✗'}</span>${escaped(item.message)}
+    </li>`).join('');
+  return `<div class="feedback ${result.passed ? 'ok' : 'bad'}" tabindex="-1" aria-live="polite">
+    <div class="feedback-head">${result.passed ? 'Stage passed' : 'Not yet'}</div>
+    <ul>${results}</ul>
+    ${result.passed && result.debrief ? `<div class="stage-debrief"><strong>Debrief.</strong> ${escaped(result.debrief)}</div>` : ''}
+    ${result.passed && result.scenario_debrief ? `<div class="stage-debrief scenario-debrief"><strong>Scenario complete.</strong> ${escaped(result.scenario_debrief)}</div>` : ''}
+    ${result.passed && result.next ? '<button class="btn primary" data-action="scenario-next">Next stage</button>' : ''}
+    ${result.passed && !result.next && !result.scenario_debrief ? '<button class="btn" data-action="refresh-scenarios">Finish remaining stages, then reload</button>' : ''}
+  </div>`;
+}
+
+async function submitScenarioStage() {
+  const scenario = state.scenarioDoc;
+  const stage = scenario?.stages[state.stageIndex];
+  if (!stage) return;
+  const form = $('#scenario-form');
+  const payload = { scenario_id: scenario.id, stage_id: stage.id };
+  const answerInput = form?.querySelector('input[name="answer"]');
+  if (answerInput?.type === 'radio') {
+    const checked = form.querySelector('input[name="answer"]:checked');
+    if (checked) payload.answer = checked.value;
+  } else if (answerInput) {
+    payload.answer = answerInput.value;
+  }
+  const spl = form?.querySelector('[name="spl"]');
+  if (spl) payload.spl = spl.value;
+  const review = form?.querySelector('[name="review"]');
+  if (review) payload.review = review.value;
+  if (!payload.answer && !payload.spl && !payload.review) {
+    toast('Answer the question first.', true);
+    return;
+  }
+  const button = form?.querySelector('button[type="submit"]');
+  if (button) {
+    button.disabled = true;
+    button.textContent = 'Checking…';
+  }
+  try {
+    state.lastCheck = await api('/api/scenario/check', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    });
+    if (state.lastCheck.passed) {
+      const completed = new Set(scenario.progress.completed || []);
+      completed.add(stage.id);
+      scenario.progress.completed = Array.from(completed);
+      loadScenarios();
+    }
+  } catch (error) {
+    state.lastCheck = null;
+    toast(error.message, true);
+  }
+  renderScenarioDetail();
+  const feedback = $('.feedback');
+  if (feedback) feedback.focus();
+}
+
+function moveScenarioStage(index) {
+  const stages = state.scenarioDoc?.stages || [];
+  state.stageIndex = Math.max(0, Math.min(index, stages.length - 1));
+  state.lastCheck = null;
+  renderScenarioDetail();
+  $('#stage-title')?.focus();
+}
+
+async function loadScenarioFile(event) {
+  const input = event.target;
+  const file = input.files && input.files[0];
+  input.value = '';
+  if (!file) return;
+  if (!/\.json$/i.test(file.name)) {
+    toast('Choose a .json scenario file.', true);
+    return;
+  }
+  let scenario;
+  try {
+    scenario = JSON.parse(await file.text());
+  } catch {
+    toast('That file is not valid JSON.', true);
+    return;
+  }
+  try {
+    const result = await api('/api/scenario/load', {
+      method: 'POST',
+      body: JSON.stringify({ filename: file.name, scenario }),
+    });
+    toast(`Loaded ${result.filename}.`);
+    await loadScenarios();
+    await openScenario(result.id);
+  } catch (error) {
+    toast(error.message, true);
+  }
+}
+
+async function startScenarioSetup() {
+  if (!state.scenarioId) return;
+  const button = document.querySelector('[data-action="scenario-setup"]');
+  if (button) {
+    button.disabled = true;
+    button.textContent = 'Setting up…';
+  }
+  try {
+    await api('/api/scenario/setup', {
+      method: 'POST',
+      body: JSON.stringify({ scenario_id: state.scenarioId }),
+    });
+    wasRunning = true;
+    openDrawer();
+    pollJobs();
+  } catch (error) {
+    if (button) {
+      button.disabled = false;
+      button.textContent = 'Set up scenario';
+    }
+    toast(error.message, true);
+  }
+}
+
+async function resetScenario() {
+  if (!state.scenarioId) return;
+  const ok = confirm('Reset progress for this scenario?\n\nCompleted stages and saved explanations will be deleted.');
+  if (!ok) return;
+  try {
+    await api('/api/scenario/reset', {
+      method: 'POST',
+      body: JSON.stringify({ scenario_id: state.scenarioId }),
+    });
+  } catch (error) {
+    toast(error.message, true);
+    return;
+  }
+  state.lastCheck = null;
+  state.hintCount = {};
+  await openScenario(state.scenarioId);
+  await loadScenarios();
+}
+
+async function refreshScenario() {
+  await loadScenarios();
+  if (state.scenarioId) await openScenario(state.scenarioId, true);
+}
+
+function currentScenarioStage() {
+  return state.scenarioDoc?.stages[state.stageIndex] || null;
+}
+
+function scenarioBaseQuery() {
+  const index = state.status?.index || 'attack_data';
+  const host = state.scenarioPreflight?.host || '';
+  return host ? `index=${index} host="${host}"\n` : `index=${index}\n`;
+}
+
+/* ------------------------------------------------------------------ */
 /* search                                                             */
 /* ------------------------------------------------------------------ */
 
@@ -790,6 +1170,8 @@ async function pollJobs() {
 async function refreshAfterJobs() {
   await loadStatus();
   await loadDatasets(true);
+  await loadScenarios();
+  if (state.scenarioId) await openScenario(state.scenarioId, true);
   if (!state.status?.repo?.ready) {
     state.selected = null;
     state.selectedDetail = null;
@@ -824,7 +1206,9 @@ async function downloadDataset(path) {
 }
 
 async function replayDataset(path) {
-  const label = state.selectedDetail?.label || path;
+  const label = state.selectedDetail?.path === path
+    ? state.selectedDetail.label
+    : (state.scenarioDoc?.dataset.path === path ? state.scenarioDoc.title : path);
   const ok = confirm(
     `Replay "${label}" into Splunk index ${state.status?.index || 'attack_data'}?\n\n` +
     'Replaying the same dataset twice duplicates events.'
@@ -928,6 +1312,30 @@ function handleAction(action, element) {
       if (recipe) loadRecipeIntoSearch(recipe);
       break;
     }
+    case 'scenario-open': openScenario(element.dataset.id); break;
+    case 'scenario-load': $('#scenario-file').click(); break;
+    case 'scenario-setup': startScenarioSetup(); break;
+    case 'scenario-stage': moveScenarioStage(Number(element.dataset.index)); break;
+    case 'scenario-next': moveScenarioStage(state.stageIndex + 1); break;
+    case 'scenario-hint': {
+      const stage = currentScenarioStage();
+      if (stage) {
+        state.hintCount[stage.id] = (state.hintCount[stage.id] || 0) + 1;
+        renderScenarioDetail();
+      }
+      break;
+    }
+    case 'scenario-new-search': {
+      showTab('search');
+      hideSearchContext();
+      $('#spl').value = scenarioBaseQuery();
+      $('#search-range').value = 'all';
+      $('#spl').focus();
+      break;
+    }
+    case 'scenario-open-splunk': openInSplunk(scenarioBaseQuery(), 'all'); break;
+    case 'scenario-reset': resetScenario(); break;
+    case 'refresh-scenarios': refreshScenario(); break;
     case 'run-recipe': {
       const recipe = findRecipe(element.dataset.recipe);
       if (recipe) loadRecipeIntoSearch(recipe, element.dataset.host);
@@ -984,6 +1392,15 @@ function bindEvents() {
     }
   });
 
+  $('#scenario-file').addEventListener('change', loadScenarioFile);
+
+  document.addEventListener('submit', (event) => {
+    if (event.target.id === 'scenario-form') {
+      event.preventDefault();
+      submitScenarioStage();
+    }
+  });
+
   document.addEventListener('keydown', (event) => {
     if (event.key === 'Escape') closeDrawer();
   });
@@ -992,7 +1409,7 @@ function bindEvents() {
 async function init() {
   bindEvents();
   await loadStatus();
-  await Promise.all([loadDatasets(), loadRecipes()]);
+  await Promise.all([loadDatasets(), loadRecipes(), loadScenarios()]);
   pollJobs();
 }
 
