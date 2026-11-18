@@ -16,6 +16,7 @@ import json
 import os
 import re
 import shlex
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -179,6 +180,67 @@ def ensure_splunk_ready():
     return ensure_hec_token()
 
 
+def ensure_delete_capability(job):
+    try:
+        resp = splunk_request(
+            "GET", f"/services/authentication/users/{SPLUNK_USER}", params={"output_mode": "json"}
+        )
+    except requests.RequestException as exc:
+        raise SplunkError(f"Splunk is not reachable at {SPLUNK_URL}: {exc}") from exc
+    if resp.status_code != 200:
+        raise SplunkError(f"Could not read user {SPLUNK_USER}: {response_error(resp)}")
+    roles = resp.json()["entry"][0]["content"].get("roles") or []
+    if "can_delete" in roles:
+        return
+    data = [("roles", role) for role in roles]
+    data.append(("roles", "can_delete"))
+    data.append(("output_mode", "json"))
+    updated = splunk_request("POST", f"/services/authentication/users/{SPLUNK_USER}", data=data)
+    if updated.status_code not in (200, 201):
+        raise SplunkError(
+            "Event deletion needs the can_delete role. Ask an administrator to add it: "
+            f"{response_error(updated)}"
+        )
+    job.log(f"Granted the can_delete role to {SPLUNK_USER} (required by Splunk's delete command).")
+
+
+def event_count(job, host=None):
+    query = f"index={INDEX} | stats count"
+    if host:
+        query = f'index={INDEX} host="{host}" | stats count'
+    rows = splunk_search(query, earliest="0", limit=1)["rows"]
+    return int(float(rows[0].get("count") or 0)) if rows else 0
+
+
+def delete_events(job, host=None):
+    ensure_delete_capability(job)
+    label = f"host {host}" if host else f"index {INDEX}"
+    before = event_count(job, host)
+    if before == 0:
+        job.log(f"No events to delete for {label}.")
+        return
+    job.log(f"Deleting {before} events for {label}...")
+    query = f"index={INDEX} | delete"
+    if host:
+        query = f'index={INDEX} host="{host}" | delete'
+    splunk_search(query, earliest="0", limit=1)
+    deadline = time.time() + 120
+    remaining = before
+    while time.time() < deadline:
+        remaining = event_count(job, host)
+        if remaining == 0:
+            break
+        time.sleep(2)
+    if remaining:
+        job.log(
+            f"Delete was accepted, but {remaining} events are still visible. "
+            "Splunk may need more time; refresh in a minute."
+        )
+    else:
+        job.log(f"Deleted all events for {label}.")
+    job.log("Splunk reclaims disk space when buckets roll or trim.")
+
+
 def get_hec_token():
     try:
         resp = splunk_request("GET", "/services/data/inputs/http", params={"output_mode": "json"})
@@ -324,6 +386,27 @@ def inside_datasets(path):
         return False
 
 
+def local_data_files(folder):
+    try:
+        return sorted(
+            path
+            for path in folder.iterdir()
+            if path.is_file() and path.suffix.lower() in DATA_SUFFIXES
+        )
+    except OSError:
+        return []
+
+
+def format_bytes(size):
+    size = float(size or 0)
+    for unit in ("B", "KB", "MB", "GB"):
+        if size < 1024 or unit == "GB":
+            return f"{size:.0f} {unit}" if unit == "B" or size >= 10 else f"{size:.1f} {unit}"
+        size /= 1024
+    return f"{size:.0f} GB"
+
+
+
 def tempfile_dir():
     directory = Path("/tmp/opencode")
     directory.mkdir(parents=True, exist_ok=True)
@@ -458,6 +541,7 @@ def build_scan():
         group["bytes"] = sum(f["bytes"] for f in present)
         group["file_count"] = len(files)
         group["ready_files"] = len(real)
+        group["local_files"] = [path.name for path in local_data_files(DATASETS_DIR / group["path"])]
         group["ymls"] = sorted(set(group["ymls"]))
         del group["file_keys"]
 
@@ -500,6 +584,7 @@ def public_group(group):
         "description": group["description"],
         "ymls": len(group["ymls"]),
         "legacy": group["legacy"],
+        "local_count": len(group["local_files"]),
         "updated": group["mtime"],
     }
 
@@ -827,12 +912,92 @@ def make_repo_runner():
     return runner
 
 
+def make_delete_download_runner(rel):
+    def runner(job):
+        folder = safe_dataset_dir(rel)
+        files = local_data_files(folder)
+        if not files:
+            job.log("No downloaded data files in this folder.")
+            return
+        total = 0
+        for path in files:
+            size = 0 if path.is_symlink() else path.stat().st_size
+            path.unlink()
+            total += size
+            job.log(f"Removed {path.name}")
+        invalidate_scan()
+        job.log("")
+        job.log(
+            f"Freed {format_bytes(total)}. YAML metadata is kept; use Download to restore the data."
+        )
+
+    return runner
+
+
+def make_delete_replay_runner(hosts):
+    def runner(job):
+        if not hosts:
+            raise RuntimeError("This dataset has no declared host id to delete.")
+        for host in hosts:
+            if not HOST_RE.match(host):
+                raise RuntimeError(f"Refusing to delete with an invalid host value: {host}")
+            delete_events(job, host)
+
+    return runner
+
+
+def make_delete_all_replay_runner():
+    def runner(job):
+        delete_events(job)
+
+    return runner
+
+
+def make_remove_repo_runner():
+    def runner(job):
+        local = LOCAL_ATTACK_DATA.resolve()
+        if ATTACK_DATA.resolve() != local:
+            raise RuntimeError(
+                "Refusing to delete a checkout the app does not manage. "
+                "Only ./attack_data can be removed from here."
+            )
+        if not local.exists():
+            job.log("attack_data is already absent.")
+            return
+        job.log(f"Removing {local} ...")
+        if local.is_symlink():
+            local.unlink()
+        else:
+            shutil.rmtree(local)
+        refresh_paths()
+        invalidate_scan()
+        job.log("Removed the local attack_data checkout. Clone it again when needed.")
+
+    return runner
+
+
+def restore_tracked_data_files(job, rel):
+    proc = subprocess.run(
+        ["git", "-C", str(ATTACK_DATA), "ls-tree", "-r", "--name-only", "HEAD", "--", f"datasets/{rel}"],
+        capture_output=True,
+        text=True,
+    )
+    if proc.returncode != 0:
+        return
+    for repo_path in proc.stdout.splitlines():
+        path = ATTACK_DATA / repo_path
+        if not path.is_file() and path.suffix.lower() in DATA_SUFFIXES:
+            job.log(f"Restoring tracked file {path.name}")
+            run_command(job, ["git", "-C", str(ATTACK_DATA), "checkout", "HEAD", "--", repo_path])
+
+
 def make_download_runner(rel):
     def runner(job):
         if not DATASETS_DIR.is_dir():
             raise RuntimeError(
                 "attack_data is not available. Clone the repository from the dashboard first."
             )
+        restore_tracked_data_files(job, rel)
         run_command(job, ["git", "-C", str(ATTACK_DATA), "lfs", "pull", f"--include={rel}/"])
         invalidate_scan()
         group = get_scan(force=True)["by_path"].get(rel)
@@ -1023,41 +1188,133 @@ def merge_props(existing):
     return existing.rstrip() + "\n\n" + addition + "\n"
 
 
+SOC_COMMENT_PREFIXES = (
+    "# --- SOC Lab:",
+    "# attack_data replays raw",
+    "# XmlWinEventLog sourcetype does not",
+    "# HEC-ingested events, so add",
+    "# Installed by soc_lab/",
+    "# One dynamic extraction covers",
+    "# e.g. ProcessName, CommandLine",
+)
+SOC_FIELD_STANZAS = {
+    "soc_attack_xml_data",
+    "soc_attack_xml_eventid",
+    "soc_attack_xml_channel",
+    "soc_attack_xml_computer",
+}
+
+
+def split_stanzas(text):
+    return re.split(r"(?m)^(?=\[[^\]\n]+\]\s*$)", text)
+
+
+def join_blocks(blocks):
+    text = "\n\n".join(block.strip("\n") for block in blocks if block.strip())
+    return f"{text}\n" if text else ""
+
+
+def strip_soc_comments(text):
+    lines = [
+        line
+        for line in text.splitlines()
+        if not any(line.strip().startswith(prefix) for prefix in SOC_COMMENT_PREFIXES)
+    ]
+    return "\n".join(lines)
+
+
+def drop_stanzas(text, names):
+    blocks = []
+    for block in split_stanzas(text):
+        match = re.match(r"^\[([^\]\n]+)\]", block)
+        if match and match.group(1).strip() in names:
+            continue
+        blocks.append(block)
+    return join_blocks(blocks)
+
+
+def drop_empty_stanzas(text):
+    blocks = []
+    for block in split_stanzas(text):
+        lines = [
+            line for line in block.splitlines() if line.strip() and not line.strip().startswith("#")
+        ]
+        if block.lstrip().startswith("[") and len(lines) <= 1:
+            continue
+        blocks.append(block)
+    return join_blocks(blocks)
+
+
+def strip_field_props(text):
+    text = strip_soc_comments(text)
+    lines = [line for line in text.splitlines() if "REPORT-soc_attack_xml" not in line]
+    return drop_empty_stanzas("\n".join(lines))
+
+
+def strip_field_transforms(text):
+    return drop_stanzas(strip_soc_comments(text), SOC_FIELD_STANZAS)
+
+
+def read_container_file(path):
+    proc = subprocess.run(
+        ["docker", "exec", "-u", "root", CONTAINER, "cat", path],
+        capture_output=True,
+        text=True,
+        timeout=15,
+    )
+    return proc.stdout if proc.returncode == 0 else ""
+
+
+def write_container_file(job, path, text, backup=False):
+    if backup:
+        subprocess.run(
+            ["docker", "exec", "-u", "root", CONTAINER, "cp", path, path + ".soc_lab.bak"],
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+    with tempfile.NamedTemporaryFile(
+        "w", suffix=".conf", dir=tempfile_dir(), delete=False, encoding="utf-8"
+    ) as handle:
+        handle.write(text)
+        temp_path = handle.name
+    try:
+        run_command(job, ["docker", "cp", temp_path, f"{CONTAINER}:{path}"])
+        job.log(f"Wrote {path}")
+    finally:
+        try:
+            os.unlink(temp_path)
+        except OSError:
+            pass
+
+
+def remove_container_file(job, path):
+    run_command(job, ["docker", "exec", "-u", "root", CONTAINER, "rm", "-f", path])
+    job.log(f"Removed {path}")
+
+
+def chown_container_files(job, *paths):
+    run_command(
+        job,
+        ["docker", "exec", "-u", "root", CONTAINER, "chown", "splunk:splunk", *paths],
+    )
+
+
+def reload_splunk_configs(job):
+    for conf in ("props", "transforms"):
+        try:
+            resp = splunk_request("POST", f"/services/configs/conf-{conf}/_reload", timeout=30)
+            job.log(f"Reloaded {conf}: HTTP {resp.status_code}")
+        except requests.RequestException as exc:
+            raise RuntimeError(
+                f"Splunk config was written but Splunk is not reachable to reload: {exc}"
+            ) from exc
+
+
 def make_install_fields_runner():
     def runner(job):
         if not FIELD_PROPS.exists() or not FIELD_TRANSFORMS.exists():
             raise RuntimeError("soc_lab/splunk_config files are missing.")
-
-        def read_container_file(path):
-            proc = subprocess.run(
-                ["docker", "exec", "-u", "root", CONTAINER, "cat", path],
-                capture_output=True,
-                text=True,
-                timeout=15,
-            )
-            return proc.stdout if proc.returncode == 0 else ""
-
-        def write_container_file(path, text, backup=False):
-            if backup:
-                subprocess.run(
-                    ["docker", "exec", "-u", "root", CONTAINER, "cp", path, path + ".soc_lab.bak"],
-                    capture_output=True,
-                    text=True,
-                    timeout=15,
-                )
-            with tempfile.NamedTemporaryFile(
-                "w", suffix=".conf", dir=tempfile_dir(), delete=False, encoding="utf-8"
-            ) as handle:
-                handle.write(text)
-                temp_path = handle.name
-            try:
-                run_command(job, ["docker", "cp", temp_path, f"{CONTAINER}:{path}"])
-                job.log(f"Wrote {path}")
-            finally:
-                try:
-                    os.unlink(temp_path)
-                except OSError:
-                    pass
 
         job.log("Installing search-time field extraction into Splunk...")
         subprocess.run(
@@ -1071,7 +1328,9 @@ def make_install_fields_runner():
         existing_props = read_container_file("/opt/splunk/etc/system/local/props.conf")
         merged_props = merge_props(existing_props)
         if merged_props != existing_props:
-            write_container_file("/opt/splunk/etc/system/local/props.conf", merged_props, backup=True)
+            write_container_file(
+                job, "/opt/splunk/etc/system/local/props.conf", merged_props, backup=True
+            )
 
         existing_transforms = read_container_file("/opt/splunk/etc/system/local/transforms.conf")
         if "soc_attack_xml_eventid" not in existing_transforms:
@@ -1080,33 +1339,15 @@ def make_install_fields_runner():
                 merged += "\n\n"
             merged += FIELD_TRANSFORMS.read_text(encoding="utf-8").strip() + "\n"
             write_container_file(
-                "/opt/splunk/etc/system/local/transforms.conf", merged, backup=True
+                job, "/opt/splunk/etc/system/local/transforms.conf", merged, backup=True
             )
 
-        run_command(
+        chown_container_files(
             job,
-            [
-                "docker",
-                "exec",
-                "-u",
-                "root",
-                CONTAINER,
-                "chown",
-                "splunk:splunk",
-                "/opt/splunk/etc/system/local/props.conf",
-                "/opt/splunk/etc/system/local/transforms.conf",
-            ],
+            "/opt/splunk/etc/system/local/props.conf",
+            "/opt/splunk/etc/system/local/transforms.conf",
         )
-        for conf in ("props", "transforms"):
-            try:
-                resp = splunk_request(
-                    "POST", f"/services/configs/conf-{conf}/_reload", timeout=30
-                )
-                job.log(f"Reloaded {conf}: HTTP {resp.status_code}")
-            except requests.RequestException as exc:
-                raise RuntimeError(
-                    f"Fields were written but Splunk is not reachable to reload: {exc}"
-                ) from exc
+        reload_splunk_configs(job)
 
         time.sleep(1)
         job.log("Verifying...")
@@ -1122,6 +1363,39 @@ def make_install_fields_runner():
                 "Fields were installed but could not be verified yet (index may be empty). "
                 "Re-run status after indexing data."
             )
+
+    return runner
+
+
+def make_uninstall_fields_runner():
+    def runner(job):
+        props_path = "/opt/splunk/etc/system/local/props.conf"
+        transforms_path = "/opt/splunk/etc/system/local/transforms.conf"
+        existing_props = read_container_file(props_path)
+        existing_transforms = read_container_file(transforms_path)
+        new_props = strip_field_props(existing_props)
+        new_transforms = strip_field_transforms(existing_transforms)
+        if new_props == existing_props and new_transforms == existing_transforms:
+            job.log("SOC Lab field extraction is not installed.")
+            return
+
+        job.log("Removing SOC Lab field extraction...")
+        if new_props.strip():
+            write_container_file(job, props_path, new_props)
+        else:
+            remove_container_file(job, props_path)
+        if new_transforms.strip():
+            write_container_file(job, transforms_path, new_transforms)
+        else:
+            remove_container_file(job, transforms_path)
+
+        existing = [
+            path for path in (props_path, transforms_path) if read_container_file(path).strip()
+        ]
+        if existing:
+            chown_container_files(job, *existing)
+        reload_splunk_configs(job)
+        job.log("Removed. Reinstall from the dashboard when you need Windows fields again.")
 
     return runner
 
@@ -1220,6 +1494,7 @@ class Handler(BaseHTTPRequestHandler):
                     {
                         "files": group["files"],
                         "yml_files": group["ymls"],
+                        "local_files": group["local_files"],
                         "environment": group["environment"],
                         "legacy": group["legacy"],
                     }
@@ -1288,6 +1563,29 @@ class Handler(BaseHTTPRequestHandler):
                 self._send_json(job.snapshot(), 202)
             elif parsed.path == "/api/install-fields":
                 job = start_job("Install Windows field extraction", "setup", make_install_fields_runner())
+                self._send_json(job.snapshot(), 202)
+            elif parsed.path == "/api/uninstall-fields":
+                job = start_job("Remove Windows field extraction", "setup", make_uninstall_fields_runner())
+                self._send_json(job.snapshot(), 202)
+            elif parsed.path == "/api/dataset/delete-replay":
+                rel = str(payload.get("path") or "").strip()
+                group = get_scan()["by_path"].get(rel)
+                if not group:
+                    raise ValueError("Dataset folder not found.")
+                if not group["host_list"]:
+                    raise ValueError("This dataset has no host id, so its events cannot be scoped.")
+                job = start_job(f"Delete replayed events · {rel}", "delete", make_delete_replay_runner(group["host_list"]))
+                self._send_json(job.snapshot(), 202)
+            elif parsed.path == "/api/dataset/delete-download":
+                target = safe_dataset_dir(payload.get("path"))
+                rel = target.relative_to(DATASETS_DIR.resolve()).as_posix()
+                job = start_job(f"Delete downloaded files · {rel}", "delete", make_delete_download_runner(rel))
+                self._send_json(job.snapshot(), 202)
+            elif parsed.path == "/api/lab/delete-replay":
+                job = start_job("Delete all replayed events", "delete", make_delete_all_replay_runner())
+                self._send_json(job.snapshot(), 202)
+            elif parsed.path == "/api/repo/remove":
+                job = start_job("Remove local attack_data checkout", "delete", make_remove_repo_runner())
                 self._send_json(job.snapshot(), 202)
             elif parsed.path == "/api/search":
                 spl = payload.get("q") or ""

@@ -39,6 +39,19 @@ In the UI:
 Splunk's index and HEC token are created automatically on the first replay if
 they do not already exist. Use `--port 8766` if 8765 is taken.
 
+## What you can do
+
+- **Dashboard** — Splunk/API/HEC/field status, next steps, replayed datasets,
+  job output, and a danger zone for bulk cleanup.
+- **Datasets** — browse and filter technique folders; download one folder at a
+  time, replay it, read its YAML metadata, and open host-scoped hunts.
+- **Search** — run SPL, inspect result rows, or open the query in Splunk Web.
+  Suggested hunts show their title and explanation above the editor so the
+  query has context.
+- **Playbook** — five phases of ready hunts, from data inventory to triage.
+- **Delete** — replay events (per dataset or all), downloaded data files, the
+  app-managed clone, and the installed field extraction.
+
 ## Docker Compose
 
 `docker-compose.yml` is the canonical lab definition:
@@ -90,6 +103,25 @@ Some folders use the repo's older YAML layout (`dataset:` GitHub URLs instead of
 `datasets:` paths). The UI labels these **legacy YAML**, maps each URL to the
 matching local file, and infers `sourcetype`/`source` from the YAML hints and the
 file contents (an XML `<Channel>` wins). Download the folder first.
+
+## Deleting data
+
+All data the app adds can be removed again:
+
+| Where | Action | What it removes |
+|---|---|---|
+| Dataset detail | Delete replayed events | Events for that dataset's host via Splunk `\| delete` |
+| Dataset detail | Delete downloaded files | Local logs/data in that folder; YAML metadata stays |
+| Dashboard → Danger zone | Delete all replayed events | Every event in the lab index |
+| Dashboard → Danger zone | Remove cloned attack_data | Only the app-managed `./attack_data` clone |
+| Dashboard → Danger zone | Remove field extraction | The SOC Lab `props.conf`/`transforms.conf` stanzas |
+
+Splunk's `delete` command needs the `can_delete` role. The app adds that role to
+the configured admin user the first time you delete replayed events (the role
+exists in stock Splunk). Deleted events disappear immediately from searches, but
+Splunk reclaims disk space only when buckets roll or trim. Deleting downloaded
+files is reversible with **Download**; small files tracked outside Git LFS are
+restored from `HEAD` as part of that download.
 
 ## Configuration
 

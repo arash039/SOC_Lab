@@ -126,6 +126,32 @@ function renderStatus() {
   renderChecklist();
   renderLoaded();
   renderRecentJobs();
+  renderDangerZone();
+}
+
+function renderDangerZone() {
+  const s = state.status;
+  const container = $('#danger-actions');
+  if (!s || !container) return;
+  const buttons = [];
+  if ((s.data?.events || 0) > 0) {
+    buttons.push(
+      `<button class="btn danger" data-action="delete-all-replay">Delete all replayed events (${fmt.format(s.data.events)})</button>`
+    );
+  }
+  if (s.repo?.ready && !s.repo.using_parent_checkout) {
+    buttons.push(
+      '<button class="btn danger" data-action="remove-repo">Remove cloned attack_data</button>'
+    );
+  }
+  if (s.fields?.installed) {
+    buttons.push(
+      '<button class="btn danger" data-action="uninstall-fields">Remove field extraction</button>'
+    );
+  }
+  container.innerHTML = buttons.length
+    ? buttons.join('')
+    : '<p class="muted small">Nothing the app added is left to remove.</p>';
 }
 
 function renderBanner() {
@@ -389,7 +415,20 @@ async function openDataset(path, silent = false) {
     renderDetail();
   } catch (error) {
     if (!silent) toast(error.message, true);
+    if (/not found/i.test(error.message)) {
+      state.selected = null;
+      state.selectedDetail = null;
+      renderDetailEmpty();
+    }
   }
+}
+
+function renderDetailEmpty() {
+  $('#ds-detail').innerHTML = `<div class="empty">
+    <div class="empty-icon">⌁</div>
+    <h2>Pick a dataset</h2>
+    <p class="muted">Choose a technique folder to read the scenario, replay it, and run focused hunts.</p>
+  </div>`;
 }
 
 function renderDetail() {
@@ -433,6 +472,16 @@ function renderDetail() {
       <div class="hunt-why">${escaped(recipe.why)}</div>
     </div>`).join('') : '<p class="muted">No technique-specific hunts yet. Use the Playbook for generic ones.</p>';
 
+  const localCount = (detail.local_files || []).length;
+  const deleteButtons = [
+    loaded
+      ? `<button class="btn danger" data-action="delete-replay" data-path="${escaped(detail.path)}">Delete replayed events</button>`
+      : '',
+    localCount
+      ? `<button class="btn danger" data-action="delete-download" data-path="${escaped(detail.path)}">Delete downloaded files (${localCount})</button>`
+      : '',
+  ].filter(Boolean).join('');
+
   $('#ds-detail').innerHTML = `
     <div class="section-head" style="padding:0 0 8px">
       <div>
@@ -467,7 +516,15 @@ function renderDetail() {
       <tbody>${fileRows}</tbody></table></div>` : '<p class="muted">No file list in this YAML (legacy format). Replay uses the data files present in the folder.</p>'}
 
     <h2 style="font-size:14px;margin:20px 0 2px">Suggested hunts${loaded ? ' · scoped to this host' : ''}</h2>
-    <div class="hunt-list">${hunts}</div>`;
+    <div class="hunt-list">${hunts}</div>
+    ${deleteButtons ? `
+      <h2 style="font-size:14px;margin:22px 0 2px">Data management</h2>
+      <div class="detail-actions">${deleteButtons}</div>
+      <div class="note warn">
+        Deleting replayed events removes them from searches (disk is reclaimed when Splunk
+        rolls buckets). Deleting downloaded files keeps the YAML metadata and frees the
+        local logs; use Download to restore them.
+      </div>` : ''}`;
 }
 
 function recipeMatches(recipe, techniques) {
@@ -566,7 +623,35 @@ function loadRecipeIntoSearch(recipe, host) {
   }
   showTab('search');
   $('#spl').value = spl;
+  showSearchContext(recipe);
   runSearch();
+}
+
+function showSearchContext(recipe) {
+  const box = $('#search-context');
+  if (!recipe) {
+    box.classList.add('hidden');
+    box.innerHTML = '';
+    return;
+  }
+  const techniques = (recipe.techniques || [])
+    .map((tech) => `<span class="badge purple">${escaped(tech)}</span>`)
+    .join('');
+  box.innerHTML = `
+    <div class="search-context-head">
+      <div>
+        <strong>${escaped(recipe.title)}</strong>
+        ${techniques}
+        ${recipe.phase ? `<span class="badge blue">${escaped(recipe.phase)}</span>` : ''}
+      </div>
+      <button class="icon-btn" data-action="close-search-context" aria-label="Close description">×</button>
+    </div>
+    <p>${escaped(recipe.why || 'Suggested hunt.')}</p>`;
+  box.classList.remove('hidden');
+}
+
+function hideSearchContext() {
+  $('#search-context').classList.add('hidden');
 }
 
 /* ------------------------------------------------------------------ */
@@ -694,6 +779,12 @@ async function pollJobs() {
 async function refreshAfterJobs() {
   await loadStatus();
   await loadDatasets(true);
+  if (!state.status?.repo?.ready) {
+    state.selected = null;
+    state.selectedDetail = null;
+    renderDetailEmpty();
+    return;
+  }
   if (state.selected) await openDataset(state.selected, true);
 }
 
@@ -732,6 +823,53 @@ async function replayDataset(path) {
   await startJob('replay', path);
 }
 
+function confirmTypedDelete(message) {
+  const answer = prompt(`${message}\n\nType DELETE to confirm.`);
+  return (answer || '').trim().toUpperCase() === 'DELETE';
+}
+
+async function deleteReplayDataset(path) {
+  const label = state.selectedDetail?.label || path;
+  const ok = confirm(
+    `Delete all replayed events for "${label}" from index ${state.status?.index || 'attack_data'}?\n\n` +
+    'This removes them from searches and cannot be undone.'
+  );
+  if (!ok) return;
+  openDrawer();
+  await startJob('dataset/delete-replay', path);
+}
+
+async function deleteDownloadedFiles(path) {
+  const label = state.selectedDetail?.label || path;
+  const count = (state.selectedDetail?.local_files || []).length;
+  const ok = confirm(
+    `Delete ${count} downloaded data file${count === 1 ? '' : 's'} in "${label}"?\n\n` +
+    'The YAML metadata stays. You can download the folder again.'
+  );
+  if (!ok) return;
+  openDrawer();
+  await startJob('dataset/delete-download', path);
+}
+
+async function deleteAllReplayedEvents() {
+  const events = fmt.format(state.status?.data?.events || 0);
+  if (!confirmTypedDelete(`Delete ALL ${events} replayed events from index ${state.status?.index || 'attack_data'}?`)) return;
+  openDrawer();
+  await startJob('lab/delete-replay');
+}
+
+async function removeAttackData() {
+  if (!confirmTypedDelete('Remove the local attack_data checkout, including every downloaded dataset?')) return;
+  openDrawer();
+  await startJob('repo/remove');
+}
+
+async function uninstallFields() {
+  if (!confirmTypedDelete('Remove the SOC Lab Windows field extraction from Splunk?')) return;
+  openDrawer();
+  await startJob('uninstall-fields');
+}
+
 async function copyText(text) {
   try {
     await navigator.clipboard.writeText(text);
@@ -751,9 +889,11 @@ function handleAction(action, element) {
     case 'run-search': runSearch(); break;
     case 'open-splunk': openInSplunk($('#spl').value); break;
     case 'copy-search': copyText($('#spl').value); break;
+    case 'close-search-context': hideSearchContext(); break;
     case 'open-drawer': openDrawer(); break;
     case 'close-drawer': closeDrawer(); break;
     case 'search-host': {
+      hideSearchContext();
       showTab('search');
       $('#spl').value = `index=${state.status?.index || 'attack_data'} host="${element.dataset.host}"\n| stats count by sourcetype source\n| sort -count`;
       $('#search-range').value = 'all';
@@ -767,6 +907,11 @@ function handleAction(action, element) {
     }
     case 'download': downloadDataset(element.dataset.path); break;
     case 'replay': replayDataset(element.dataset.path); break;
+    case 'delete-replay': deleteReplayDataset(element.dataset.path); break;
+    case 'delete-download': deleteDownloadedFiles(element.dataset.path); break;
+    case 'delete-all-replay': deleteAllReplayedEvents(); break;
+    case 'remove-repo': removeAttackData(); break;
+    case 'uninstall-fields': uninstallFields(); break;
     case 'quick-recipe': {
       const recipe = findRecipe(element.dataset.recipe);
       if (recipe) loadRecipeIntoSearch(recipe);

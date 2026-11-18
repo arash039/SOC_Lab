@@ -106,6 +106,41 @@ class FieldConfigTests(unittest.TestCase):
         self.assertIn("[other]", merged)
         self.assertEqual(merged.count("[XmlWinEventLog]"), 1)
 
+    def test_strip_field_props_removes_lab_config_only(self):
+        lab = app.FIELD_PROPS.read_text()
+        self.assertEqual(app.strip_field_props(lab), "")
+        existing = (
+            "[XmlWinEventLog]\nSHOULD_LINEMERGE = false\n"
+            "REPORT-soc_attack_xml = a, b\n\n[other]\nA = b\n"
+        )
+        stripped = app.strip_field_props(existing)
+        self.assertIn("SHOULD_LINEMERGE = false", stripped)
+        self.assertIn("[other]", stripped)
+        self.assertNotIn("REPORT-soc_attack_xml", stripped)
+
+    def test_strip_field_transforms_removes_lab_stanzas(self):
+        lab = app.FIELD_TRANSFORMS.read_text()
+        self.assertEqual(app.strip_field_transforms(lab), "")
+        self.assertIn("soc_attack_xml_eventid", lab)
+
+
+class DeleteHelperTests(unittest.TestCase):
+    def test_local_data_files_excludes_yaml(self):
+        with tempfile.TemporaryDirectory(dir="/tmp/opencode") as tmp:
+            folder = Path(tmp)
+            (folder / "data.log").write_text("<Event/>")
+            (folder / "events.json").write_text("{}")
+            (folder / "notes.yml").write_text("id: x")
+            (folder / "readme.md").write_text("x")
+            (folder / "sub").mkdir()
+            names = [path.name for path in app.local_data_files(folder)]
+        self.assertEqual(names, ["data.log", "events.json"])
+
+    def test_format_bytes(self):
+        self.assertEqual(app.format_bytes(0), "0 B")
+        self.assertEqual(app.format_bytes(1536), "1.5 KB")
+        self.assertEqual(app.format_bytes(12 * 1024 * 1024), "12 MB")
+
 
 class RecipesTests(unittest.TestCase):
     def test_recipes_are_well_formed(self):

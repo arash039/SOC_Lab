@@ -74,6 +74,22 @@
         </div>
         <div id="recent-jobs"><p class="muted">No jobs yet.</p></div>
       </div>
+
+      <details class="panel danger-zone" id="danger-zone">
+        <summary>
+          <div>
+            <h2>Danger zone</h2>
+            <span class="muted small">irreversible cleanup actions</span>
+          </div>
+          <span class="chev">▾</span>
+        </summary>
+        <div id="danger-actions" class="danger-actions"></div>
+        <p class="note warn">
+          Deleting replayed events removes them from searches; Splunk reclaims disk
+          space later when buckets roll. Deleting downloaded files keeps the YAML
+          metadata, so you can download the folder again.
+        </p>
+      </details>
     </section>
 
     <section id="tab-datasets" class="tab">
@@ -121,6 +137,7 @@
         <textarea id="spl" spellcheck="false" autocomplete="off">index=attack_data
 | stats count by sourcetype source
 | sort -count</textarea>
+        <div id="search-context" class="search-context hidden"></div>
         <div class="search-controls">
           <select id="search-range" aria-label="Time range">
             <option value="all" selected>All time</option>
