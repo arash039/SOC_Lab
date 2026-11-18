@@ -473,10 +473,10 @@ function renderDetail() {
   }).join('');
 
   const techniques = detail.techniques || [];
+  // Orientation hunts (no technique) first: they explain the dataset before technique hunts.
   const matchingHunts = allRecipes()
     .filter((recipe) => recipeMatches(recipe, techniques))
-    .sort((a, b) => (a.techniques?.length ? 0 : 1) - (b.techniques?.length ? 0 : 1))
-    .slice(0, 8);
+    .sort((a, b) => (a.techniques?.length ? 1 : 0) - (b.techniques?.length ? 1 : 0));
   const huntHost = loaded?.host || '';
 
   const hunts = matchingHunts.length ? matchingHunts.map((recipe) => `
