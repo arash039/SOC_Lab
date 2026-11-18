@@ -998,7 +998,10 @@ def make_download_runner(rel):
                 "attack_data is not available. Clone the repository from the dashboard first."
             )
         restore_tracked_data_files(job, rel)
-        run_command(job, ["git", "-C", str(ATTACK_DATA), "lfs", "pull", f"--include={rel}/"])
+        run_command(
+            job,
+            ["git", "-C", str(ATTACK_DATA), "lfs", "pull", f"--include=datasets/{rel}/*"],
+        )
         invalidate_scan()
         group = get_scan(force=True)["by_path"].get(rel)
         if group:
