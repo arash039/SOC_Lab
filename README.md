@@ -41,6 +41,16 @@ In the UI:
 Splunk's index and HEC token are created automatically on the first replay if
 they do not already exist. Use `--port 8766` if 8765 is taken.
 
+## Screenshots
+
+| Dashboard | Datasets | Settings |
+|---|---|---|
+| ![Dashboard](./screenshots/01-dashboard.png) | ![Datasets](./screenshots/02-datasets.png) | ![Settings](./screenshots/03-settings.png) |
+
+| Dataset detail | Search | Playbook |
+|---|---|---|
+| ![Dataset detail](./screenshots/04-dataset-detail.png) | ![Search](./screenshots/05-search.png) | ![Playbook](./screenshots/06-playbook.png) |
+
 ## What you can do
 
 - **Dashboard** — Splunk/API/HEC/field status, next steps, replayed datasets,
