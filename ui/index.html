@@ -22,10 +22,12 @@
       <button data-tab="datasets">Datasets</button>
       <button data-tab="search">Search</button>
       <button data-tab="playbook">Playbook</button>
+      <button data-tab="settings">Settings</button>
     </nav>
 
     <div class="top-actions">
       <span id="lab-pill" class="pill">checking…</span>
+      <button id="stop-lab" class="btn ghost hidden" data-action="stop-lab">Stop Splunk</button>
       <a id="splunk-link" class="btn ghost" href="http://127.0.0.1:8000" target="_blank" rel="noreferrer">Open Splunk ↗</a>
     </div>
   </header>
@@ -136,6 +138,8 @@
           <option value="ready">Downloaded</option>
           <option value="missing">Needs download</option>
           <option value="loaded">Replayed</option>
+          <option value="studied">Studied</option>
+          <option value="unstudied">Not studied</option>
         </select>
         <button class="btn" data-action="refresh-datasets">Refresh</button>
       </div>
@@ -201,6 +205,42 @@
         </div>
       </div>
       <div id="playbook"><p class="muted">Loading…</p></div>
+    </section>
+
+    <section id="tab-settings" class="tab">
+      <div class="section-head">
+        <div>
+          <h1>Settings</h1>
+          <p class="muted">Optional AI enrichment. Without it the lab stays fully local.</p>
+        </div>
+        <span id="ai-status" class="badge">not configured</span>
+      </div>
+      <div class="panel">
+        <form id="ai-settings" class="settings-form" autocomplete="off">
+          <h2>AI enrichment</h2>
+          <p class="note">
+            Used by <strong>Enrich with AI</strong> on a dataset. The dataset metadata and up to five
+            sampled events are sent to this endpoint; nothing else leaves the machine.
+          </p>
+          <label class="field">
+            <span>Endpoint (OpenAI-compatible)</span>
+            <input id="ai-endpoint" name="endpoint" type="url" placeholder="https://api.openai.com/v1" spellcheck="false">
+          </label>
+          <label class="field">
+            <span>Model</span>
+            <input id="ai-model" name="model" type="text" placeholder="gpt-4o-mini" spellcheck="false">
+          </label>
+          <label class="field">
+            <span>API key</span>
+            <input id="ai-key" name="api_key" type="password" placeholder="sk-…" spellcheck="false">
+          </label>
+          <div class="detail-actions">
+            <button class="btn primary" type="submit">Save</button>
+            <button class="btn ghost" type="button" data-action="clear-ai-key">Clear saved key</button>
+          </div>
+          <p class="note">The key is stored in <code>state/settings.json</code> on this machine with owner-only permissions.</p>
+        </form>
+      </div>
     </section>
   </main>
 

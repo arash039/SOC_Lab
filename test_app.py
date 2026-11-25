@@ -531,5 +531,60 @@ class BootstrapTests(unittest.TestCase):
         self.assertEqual(status["url"], app.REPO_URL)
 
 
+class EnrichmentParsingTests(unittest.TestCase):
+    def test_parses_fenced_json_and_drops_unsafe_or_unscoped_hunts(self):
+        text = (
+            "```json\n"
+            '{"description": " Attacker  dumped LSASS.", "hunts": ['
+            '{"title": " LSASS access ", "why": "why", "spl": "search index=attack_data EventCode=10"},'
+            '{"title": "no index", "spl": "stats count"},'
+            '{"title": "unsafe", "spl": "index=attack_data | delete"}'
+            "]}\n```"
+        )
+        parsed = app.parse_enrichment(text)
+        self.assertEqual(parsed["description"], "Attacker dumped LSASS.")
+        self.assertEqual(len(parsed["hunts"]), 1)
+        self.assertEqual(parsed["hunts"][0]["title"], "LSASS access")
+        self.assertEqual(parsed["hunts"][0]["spl"], "index=attack_data EventCode=10")
+
+    def test_rejects_reply_without_description(self):
+        with self.assertRaises(ValueError):
+            app.parse_enrichment('{"hunts": [{"title": "x", "spl": "index=x"}]}')
+
+    def test_recipe_matches_sub_technique_both_ways(self):
+        recipe = {"techniques": ["T1003"]}
+        self.assertTrue(app.recipe_matches(recipe, ["T1003.001"]))
+        self.assertTrue(app.recipe_matches({"techniques": ["T1003.001"]}, ["T1003"]))
+        self.assertTrue(app.recipe_matches({"techniques": []}, []))
+        self.assertFalse(app.recipe_matches({"techniques": ["T1059"]}, ["T1003"]))
+
+
+class StudiedStateTests(unittest.TestCase):
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory(dir="/tmp/opencode")
+        self.root = Path(self._tmp.name)
+        self.patches = [
+            mock.patch.object(app, "STATE_DIR", self.root),
+            mock.patch.object(app, "STUDIED_FILE", self.root / "studied.json"),
+        ]
+        for patch in self.patches:
+            patch.start()
+        app._studied_cache.update({"mtime": None, "data": {}})
+
+    def tearDown(self):
+        for patch in reversed(self.patches):
+            patch.stop()
+        self._tmp.cleanup()
+
+    def test_mark_survives_a_cache_reset_and_can_be_cleared(self):
+        rel = "attack_techniques/T1003.001/demo"
+        app.set_studied(rel, True)
+        self.assertTrue(app.get_studied()[rel])
+        app._studied_cache.update({"mtime": None, "data": {}})
+        self.assertTrue(app.get_studied()[rel])
+        app.set_studied(rel, False)
+        self.assertNotIn(rel, app.get_studied())
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

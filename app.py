@@ -575,6 +575,7 @@ def invalidate_scan():
 
 
 def public_group(group):
+    ai = get_enrichments().get(group["path"]) or {}
     return {
         "path": group["path"],
         "label": group["label"],
@@ -585,12 +586,333 @@ def public_group(group):
         "file_count": group["file_count"],
         "ready_files": group["ready_files"],
         "bytes": group["bytes"],
-        "description": group["description"],
+        "description": ai.get("description") or group["description"],
+        "has_ai": bool(ai),
+        "studied": bool(get_studied().get(group["path"])),
         "ymls": len(group["ymls"]),
         "legacy": group["legacy"],
         "local_count": len(group["local_files"]),
         "updated": group["mtime"],
     }
+
+
+# --------------------------------------------------------------------------- #
+# Settings and AI enrichment
+# --------------------------------------------------------------------------- #
+
+SETTINGS_FILE = STATE_DIR / "settings.json"
+ENRICH_FILE = STATE_DIR / "enrichments.json"
+STUDIED_FILE = STATE_DIR / "studied.json"
+UNSAFE_SPL_RE = re.compile(
+    r"\|\s*(delete|collect|dump|outputlookup|outputcsv|script|sendemail|runshellscript|rest)\b", re.I
+)
+_enrich_cache = {"mtime": None, "data": {}}
+_enrich_lock = threading.Lock()
+_studied_cache = {"mtime": None, "data": {}}
+_studied_lock = threading.Lock()
+
+
+def read_json_file(path, fallback):
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return fallback
+    return data if isinstance(data, type(fallback)) else fallback
+
+
+def write_json_file(path, data):
+    STATE_DIR.mkdir(parents=True, exist_ok=True)
+    temp = path.with_suffix(".tmp")
+    temp.write_text(json.dumps(data, indent=2), encoding="utf-8")
+    try:
+        os.chmod(temp, 0o600)  # the settings file holds an API key
+    except OSError:
+        pass
+    os.replace(temp, path)
+
+
+def load_settings():
+    return read_json_file(SETTINGS_FILE, {"ai": {}})
+
+
+def save_settings(data):
+    write_json_file(SETTINGS_FILE, data)
+
+
+def ai_config():
+    ai = load_settings().get("ai") or {}
+    return {
+        "endpoint": str(ai.get("endpoint") or "").strip(),
+        "model": str(ai.get("model") or "").strip(),
+        "api_key": str(ai.get("api_key") or "").strip(),
+    }
+
+
+def public_settings():
+    cfg = ai_config()
+    return {
+        "endpoint": cfg["endpoint"],
+        "model": cfg["model"],
+        "has_key": bool(cfg["api_key"]),
+        "configured": bool(cfg["endpoint"] and cfg["model"]),
+    }
+
+
+def get_enrichments():
+    try:
+        mtime = ENRICH_FILE.stat().st_mtime
+    except OSError:
+        return {}
+    with _enrich_lock:
+        if mtime != _enrich_cache["mtime"]:
+            _enrich_cache.update({"mtime": mtime, "data": read_json_file(ENRICH_FILE, {})})
+        return _enrich_cache["data"]
+
+
+def save_enrichment(rel, payload):
+    with _enrich_lock:
+        data = read_json_file(ENRICH_FILE, {})
+        data[rel] = payload
+        write_json_file(ENRICH_FILE, data)
+        _enrich_cache.update({"mtime": ENRICH_FILE.stat().st_mtime, "data": data})
+
+
+def clear_enrichment(rel):
+    with _enrich_lock:
+        data = read_json_file(ENRICH_FILE, {})
+        if rel not in data:
+            return False
+        data.pop(rel)
+        write_json_file(ENRICH_FILE, data)
+        _enrich_cache.update({"mtime": ENRICH_FILE.stat().st_mtime, "data": data})
+        return True
+
+
+def get_studied():
+    try:
+        mtime = STUDIED_FILE.stat().st_mtime
+    except OSError:
+        return {}
+    with _studied_lock:
+        if mtime != _studied_cache["mtime"]:
+            _studied_cache.update({"mtime": mtime, "data": read_json_file(STUDIED_FILE, {})})
+        return _studied_cache["data"]
+
+
+def set_studied(rel, studied):
+    """Kept in state/, keyed by path, so deleting logs or events never clears it."""
+    with _studied_lock:
+        data = read_json_file(STUDIED_FILE, {})
+        if studied:
+            data[rel] = {"at": int(time.time())}
+        else:
+            data.pop(rel, None)
+        write_json_file(STUDIED_FILE, data)
+        _studied_cache.update({"mtime": STUDIED_FILE.stat().st_mtime, "data": data})
+        return studied
+
+
+def recipe_matches(recipe, techniques):
+    wanted = recipe.get("techniques") or []
+    if not wanted:
+        return True
+    return any(
+        technique == candidate
+        or technique.startswith(f"{candidate}.")
+        or candidate.startswith(f"{technique}.")
+        for technique in techniques
+        for candidate in wanted
+    )
+
+
+def matching_recipes(techniques, limit=8):
+    try:
+        phases = json.loads((APP_DIR / "recipes.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return []
+    found = []
+    for phase in phases:
+        for recipe in phase.get("recipes") or []:
+            if len(found) < limit and recipe_matches(recipe, techniques):
+                found.append(recipe)
+    return found
+
+
+def dataset_evidence(host, job):
+    """Sample the replayed host so generated hunts use real fields, not guesses."""
+    if not host:
+        return {}
+    try:
+        sample = splunk_search(f'index={INDEX} host="{host}"', earliest="0", latest="", limit=5)
+    except SplunkError as exc:
+        job.log(f"Could not sample replayed events: {exc}")
+        return {}
+    if not sample["rows"]:
+        return {}
+    return {
+        "fields": [field for field in sample["fields"] if field],
+        "events": [json.dumps(row)[:1500] for row in sample["rows"][:5]],
+    }
+
+
+def build_enrichment_prompt(group, recipes, evidence):
+    host = (group["host_list"] or [""])[0]
+    facts = "\n".join(
+        [
+            f"Dataset folder: {group['path']}",
+            f"Techniques: {', '.join(group['technique_list']) or 'none declared'}",
+            f"Declared description: {group['description'] or '(none)'}",
+            f"Environment: {group['environment'] or '(unknown)'}",
+            f"Replay host: {host or '(none)'}",
+            f"Splunk index: {INDEX}",
+        ]
+    )
+    recipe_text = (
+        "\n".join(f"- {item['title']}: {item['spl']}" for item in recipes) or "(none)"
+    )
+    if evidence:
+        evidence_text = (
+            "Fields present in the replayed events:\n"
+            + ", ".join(evidence["fields"][:70])
+            + "\n\nSample events:\n"
+            + "\n".join(evidence["events"])
+        )
+    else:
+        evidence_text = "No replayed events are available; rely on the declared description."
+    system = (
+        "You write SOC training material from real attack telemetry. "
+        "Reply with a single strict JSON object and nothing else: no markdown, no code fences."
+    )
+    user = "\n\n".join(
+        [
+            "Write a short case description and targeted Splunk hunts for this attack_data dataset.",
+            facts,
+            "Lab recipe queries you may adapt:\n" + recipe_text,
+            evidence_text,
+            (
+                "Return JSON with exactly these keys: "
+                '{"description": "...", "hunts": [{"title": "...", "why": "...", "spl": "..."}]}\n'
+                "description: 2-4 sentences on what the attacker did in this dataset and what "
+                "evidence proves it. Do not start with 'This dataset'.\n"
+                "hunts: 2-4 hunts specific to this dataset.\n"
+                f"Rules for spl: one query, starts with index={INDEX}, uses only the fields listed "
+                f'above, filters host="{host}" when a host is given, no comments or backticks, '
+                "no delete/collect/dump/outputlookup/outputcsv/script/sendemail/runshellscript, and "
+                "returns evidence rows (stats or table are fine)."
+            ),
+        ]
+    )
+    return [{"role": "system", "content": system}, {"role": "user", "content": user}]
+
+
+def call_ai(job, messages, timeout=120):
+    cfg = ai_config()
+    if not cfg["endpoint"] or not cfg["model"]:
+        raise RuntimeError("Set the AI endpoint and model in Settings first.")
+    endpoint = cfg["endpoint"].rstrip("/")
+    if not endpoint.endswith("/chat/completions"):
+        endpoint += "/chat/completions"
+    headers = {"Content-Type": "application/json"}
+    if cfg["api_key"]:
+        headers["Authorization"] = f"Bearer {cfg['api_key']}"
+    job.log(f"Calling {endpoint} with model {cfg['model']}...")
+    try:
+        resp = requests.post(
+            endpoint,
+            headers=headers,
+            json={"model": cfg["model"], "messages": messages, "temperature": 0.2},
+            timeout=(10, timeout),
+        )
+    except requests.RequestException as exc:
+        raise RuntimeError(f"AI request failed: {exc}") from exc
+    if resp.status_code != 200:
+        raise RuntimeError(
+            f"AI endpoint returned HTTP {resp.status_code}: {resp.text[:300]}"
+        )
+    try:
+        content = resp.json()["choices"][0]["message"]["content"]
+    except (ValueError, KeyError, IndexError, TypeError):
+        raise RuntimeError("AI endpoint did not return chat message content.")
+    job.log(f"Received {len(content)} characters.")
+    return content
+
+
+def parse_enrichment(text):
+    start, end = text.find("{"), text.rfind("}")
+    if start < 0 or end <= start:
+        raise ValueError("The AI reply did not contain a JSON object.")
+    try:
+        doc = json.loads(text[start : end + 1])
+    except ValueError as exc:
+        raise ValueError(f"The AI reply was not valid JSON: {exc}") from exc
+    description = " ".join(str(doc.get("description") or "").split())[:1200]
+    if not description:
+        raise ValueError("The AI reply had no description.")
+    hunts = []
+    for item in doc.get("hunts") or []:
+        if not isinstance(item, dict):
+            continue
+        title = " ".join(str(item.get("title") or "").split())[:120]
+        why = " ".join(str(item.get("why") or "").split())[:600]
+        spl = str(item.get("spl") or "").strip()
+        if spl.lower().startswith("search "):
+            spl = spl[7:].strip()
+        if not title or not spl.lower().startswith("index=") or UNSAFE_SPL_RE.search(spl):
+            continue
+        hunts.append({"title": title, "why": why or title, "spl": spl[:2000]})
+    if not hunts:
+        raise ValueError("The AI reply had no hunts beginning with index=.")
+    return {"description": description, "hunts": hunts[:5]}
+
+
+def make_enrich_runner(rel):
+    def runner(job):
+        group = get_scan(force=True)["by_path"].get(rel)
+        if not group:
+            raise RuntimeError(f"Dataset folder not found: {rel}")
+        cfg = ai_config()
+        if not cfg["endpoint"] or not cfg["model"]:
+            raise RuntimeError("Set the AI endpoint and model in Settings first.")
+        job.log(f"Enriching {rel} with {cfg['model']}.")
+        job.log("Dataset metadata and a few sampled events are sent to the endpoint.")
+        host = (group["host_list"] or [""])[0]
+        evidence = dataset_evidence(host, job)
+        job.log(
+            f"Evidence: {len(evidence.get('fields') or [])} fields, "
+            f"{len(evidence.get('events') or [])} sample events."
+        )
+        messages = build_enrichment_prompt(group, matching_recipes(group["technique_list"]), evidence)
+        enrichment = parse_enrichment(call_ai(job, messages))
+        kept = []
+        for hunt in enrichment["hunts"]:
+            hunt["verified"] = False
+            if evidence:
+                try:
+                    rows = splunk_search(hunt["spl"], earliest="0", limit=1)["rows"]
+                except SplunkError as exc:
+                    job.log(f"Could not verify '{hunt['title']}': {exc}")
+                    kept.append(hunt)
+                    continue
+                if not rows:
+                    job.log(f"Dropped '{hunt['title']}': no replayed events matched.")
+                    continue
+                hunt["verified"] = True
+            kept.append(hunt)
+        if not kept:
+            raise RuntimeError("None of the generated hunts matched the replayed data.")
+        enrichment["hunts"] = kept
+        enrichment.update(
+            {
+                "model": cfg["model"],
+                "host": host,
+                "generated_at": int(time.time()),
+            }
+        )
+        save_enrichment(rel, enrichment)
+        job.log("")
+        job.log(f"Saved a description and {len(kept)} hunt(s). Refresh the dataset detail.")
+
+    return runner
 
 
 # --------------------------------------------------------------------------- #
@@ -1791,6 +2113,28 @@ def make_lab_runner():
     return runner
 
 
+def make_lab_stop_runner():
+    def runner(job):
+        file = compose_file()
+        if not file.exists():
+            raise RuntimeError(f"Docker Compose file not found at {file}.")
+        run_command(
+            job,
+            [
+                "docker",
+                "compose",
+                "--project-directory",
+                str(compose_project_dir()),
+                "-f",
+                str(file),
+                "stop",
+            ],
+        )
+        job.log("Splunk stopped. Replayed events stay in the Docker volume for next start.")
+
+    return runner
+
+
 def wait_for_host_events(job, host, timeout=180):
     job.log(f"Waiting for host {host} events to become searchable...")
     deadline = time.time() + timeout
@@ -2217,6 +2561,7 @@ class Handler(BaseHTTPRequestHandler):
                         "local_files": group["local_files"],
                         "environment": group["environment"],
                         "legacy": group["legacy"],
+                        "ai": get_enrichments().get(rel) or {},
                     }
                 )
                 self._send_json(detail)
@@ -2226,6 +2571,8 @@ class Handler(BaseHTTPRequestHandler):
                     for recipe in phase.get("recipes", []):
                         recipe["spl"] = recipe["spl"].replace("index=attack_data", f"index={INDEX}")
                 self._send_json(recipes)
+            elif parsed.path == "/api/settings":
+                self._send_json({"ai": public_settings()})
             elif parsed.path == "/api/scenarios":
                 self._send_json({"scenarios": scenario_summaries()})
             elif parsed.path == "/api/scenario":
@@ -2294,6 +2641,25 @@ class Handler(BaseHTTPRequestHandler):
                     raise ValueError("Splunk is already running.")
                 job = start_job("Start Splunk", "lab", make_lab_runner())
                 self._send_json(job.snapshot(), 202)
+            elif parsed.path == "/api/lab/stop":
+                if not docker_status().get("running"):
+                    raise ValueError("Splunk is not running.")
+                job = start_job("Stop Splunk", "lab", make_lab_stop_runner())
+                self._send_json(job.snapshot(), 202)
+            elif parsed.path == "/api/settings":
+                ai = dict(load_settings().get("ai") or {})
+                for field in ("endpoint", "model"):
+                    if field in payload:
+                        value = str(payload.get(field) or "").strip()
+                        if field == "endpoint" and value and not value.startswith(
+                            ("http://", "https://")
+                        ):
+                            raise ValueError("The endpoint must start with http:// or https://.")
+                        ai[field] = value[:500]
+                if "api_key" in payload:
+                    ai["api_key"] = str(payload.get("api_key") or "").strip()[:500]
+                save_settings({"ai": ai})
+                self._send_json({"ok": True, "ai": public_settings()})
             elif parsed.path == "/api/repo/clone":
                 if DATASETS_DIR.is_dir():
                     raise ValueError("attack_data is already available.")
@@ -2319,6 +2685,25 @@ class Handler(BaseHTTPRequestHandler):
                 rel = target.relative_to(DATASETS_DIR.resolve()).as_posix()
                 job = start_job(f"Delete downloaded files · {rel}", "delete", make_delete_download_runner(rel))
                 self._send_json(job.snapshot(), 202)
+            elif parsed.path == "/api/dataset/enrich":
+                rel = str(payload.get("path") or "").strip()
+                if rel not in get_scan()["by_path"]:
+                    raise ValueError("Dataset folder not found.")
+                job = start_job(f"Enrich with AI · {rel}", "enrich", make_enrich_runner(rel))
+                self._send_json(job.snapshot(), 202)
+            elif parsed.path == "/api/dataset/unenrich":
+                rel = str(payload.get("path") or "").strip()
+                if rel not in get_scan()["by_path"]:
+                    raise ValueError("Dataset folder not found.")
+                removed = clear_enrichment(rel)
+                self._send_json({"ok": True, "removed": removed})
+            elif parsed.path == "/api/dataset/studied":
+                rel = str(payload.get("path") or "").strip()
+                if rel not in get_scan()["by_path"]:
+                    raise ValueError("Dataset folder not found.")
+                studied = bool(payload.get("studied"))
+                set_studied(rel, studied)
+                self._send_json({"ok": True, "path": rel, "studied": studied})
             elif parsed.path == "/api/lab/delete-replay":
                 job = start_job("Delete all replayed events", "delete", make_delete_all_replay_runner())
                 self._send_json(job.snapshot(), 202)

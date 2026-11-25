@@ -329,6 +329,14 @@ select { cursor: pointer; }
 .ds-sub { display: flex; align-items: center; gap: 8px; margin-top: 3px; color: var(--muted); font-size: 11.5px; overflow: hidden; }
 .ds-sub .path { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: var(--mono); font-size: 10.5px; }
 .ds-side { display: flex; flex-direction: column; align-items: flex-end; gap: 3px; flex-shrink: 0; }
+.ds-row[role="button"]:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.tick {
+  width: 22px; height: 22px; padding: 0; border-radius: 50%;
+  border: 1px solid var(--line); background: transparent;
+  color: var(--muted); font-size: 12px; line-height: 1; cursor: pointer;
+}
+.tick:hover { color: var(--text); border-color: var(--accent); }
+.tick.on { color: #6ee7b7; border-color: rgba(52, 211, 153, 0.5); background: rgba(52, 211, 153, 0.14); }
 
 .ds-detail { position: sticky; top: 86px; max-height: calc(100vh - 104px); overflow: auto; }
 .ds-detail h1 { font-size: 22px; margin-bottom: 5px; }
@@ -443,6 +451,10 @@ select { cursor: pointer; }
 .field { display: flex; flex-direction: column; gap: 5px; margin: 10px 0; font-size: 12.5px; color: var(--muted); }
 .field input, .field textarea { width: 100%; color: var(--text); font-size: 13.5px; }
 .field textarea { min-height: 86px; resize: vertical; font-family: var(--mono); font-size: 12.5px; line-height: 1.55; }
+
+.settings-form { max-width: 620px; }
+.settings-form h2 { font-size: 15px; margin-bottom: 6px; }
+.settings-form input[type="password"] { font-family: var(--mono); }
 
 .stage-actions { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-top: 12px; }
 
